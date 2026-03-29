@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# macOS
+.DS_Store
+._*
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Jekyll (docs site build artifacts)
+docs/_site/
+docs/.jekyll-cache/
+docs/.jekyll-metadata
+docs/Gemfile.lock
+docs/.sass-cache/
+docs/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
