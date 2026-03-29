@@ -1,0 +1,11 @@
+// Widen main content area to reduce dead whitespace on the right.
+.main {
+  max-width: 1100px;
+}
+
+// Suppress the "This site uses Just the Docs" attribution in the sidebar.
+// The custom footer in _config.yml already provides attribution in the
+// main content area.
+.site-footer {
+  display: none;
+}

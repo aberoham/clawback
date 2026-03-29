@@ -1,4 +1,4 @@
-title: Clawback Remediation Library
+title: Clawback
 description: >-
   Credential remediation guides for macOS developer workstations.
   Companion to the clawback endpoint scanner.
@@ -12,6 +12,7 @@ search_enabled: true
 search.heading_level: 3
 nav_fold: true
 color_scheme: light
+favicon_ico: "/clawback/assets/images/favicon.ico"
 
 aux_links:
   "GitHub":
