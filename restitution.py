@@ -56,6 +56,8 @@ def dim(t: str) -> str:
 
 # ── Constants ────────────────────────────────────────────────────────
 
+SCRIPT_DIR = str(pathlib.Path(__file__).resolve().parent)
+
 REQUIRED_REPORT_KEYS = {
     "findings",
     "summary",
@@ -91,6 +93,18 @@ FIX_TYPE_MAP: Dict[str, str] = {
     "kubernetes": "kubeconfig_migrate",
     "crypto_wallets": "wallet_secure",
     "teampcp_ioc": "incident_response",
+}
+
+GUIDE_MAP: Dict[str, str] = {
+    "env_files": "shell-env-secrets.md",
+    "shell_profile_secrets": "shell-env-secrets.md",
+    "environment_variables": "shell-env-secrets.md",
+    "ssh_keys": "ssh-keys.md",
+    "git_credentials": "git-credentials.md",
+    "cloud_credentials": "index.md",
+    "kubernetes": "kubernetes-kubeconfig.md",
+    "package_manager_tokens": "index.md",
+    "crypto_wallets": "crypto-wallets.md",
 }
 
 SEVERITY_ORDER = {
@@ -161,7 +175,7 @@ class NormalizedFinding:
 class OpMatch:
     """Result of a 1Password enrichment lookup for a single secret."""
 
-    status: str  # "exact", "ambiguous", "missing"
+    status: str  # "exact", "ambiguous", "missing", "unchecked"
     vault: Optional[str] = None
     item_title: Optional[str] = None
     field_name: Optional[str] = None
@@ -685,7 +699,7 @@ def _apply_placeholder_enrichment(
     """Fill enrichment with placeholder OpMatch objects."""
     for unit in units:
         for var in _extract_var_names(unit):
-            unit.enrichment[var] = OpMatch(status="missing")
+            unit.enrichment[var] = OpMatch(status="unchecked")
 
 
 def _extract_var_names(unit: WorkUnit) -> List[str]:
@@ -705,6 +719,79 @@ def _extract_var_names(unit: WorkUnit) -> List[str]:
 
 
 # ── Prompt helpers ───────────────────────────────────────────────────
+
+OP_SSH_AGENT_SOCK = os.path.expanduser(
+    "~/Library/Group Containers/"
+    "2BUA8C4S2C.com.1password/t/agent.sock"
+)
+
+
+def _detect_op_ssh_agent() -> bool:
+    """Check if 1Password SSH agent socket exists on disk."""
+    return os.path.exists(OP_SSH_AGENT_SOCK)
+
+
+def _gather_environment_lines(
+    unit: "WorkUnit",
+) -> List[str]:
+    """Build the ## Environment section lines for a task file.
+
+    Runs read-only checks at pack-generation time so agents do
+    not waste cycles re-discovering tool availability.
+    """
+    lines: List[str] = [
+        "## Environment",
+        "",
+    ]
+
+    lines.append(
+        f"- **Scanner:** `{SCRIPT_DIR}/clawback.py` "
+        "(run with `uv run python`)"
+    )
+
+    categories = sorted(set(nf.category for nf in unit.findings))
+    guide_files = sorted(
+        set(GUIDE_MAP.get(c, "index.md") for c in categories)
+    )
+    for gf in guide_files:
+        guide_path = f"{SCRIPT_DIR}/docs/guides/{gf}"
+        lines.append(f"- **Remediation guide:** `{guide_path}`")
+
+    op_path = shutil.which("op")
+    if op_path:
+        lines.append("- **1Password CLI:** installed")
+    else:
+        lines.append("- **1Password CLI:** not installed")
+
+    has_ssh = any(
+        nf.fix_type == "ssh_harden" for nf in unit.findings
+    )
+    if has_ssh:
+        if _detect_op_ssh_agent():
+            lines.append(
+                "- **1Password SSH agent:** active "
+                f"(`{OP_SSH_AGENT_SOCK}`)"
+            )
+        else:
+            lines.append(
+                "- **1Password SSH agent:** not detected"
+            )
+
+    has_kube = any(
+        nf.fix_type == "kubeconfig_migrate"
+        for nf in unit.findings
+    )
+    if has_kube:
+        kubectl_path = shutil.which("kubectl")
+        if kubectl_path:
+            lines.append("- **kubectl:** installed")
+        else:
+            lines.append(
+                "- **kubectl:** not available — "
+                "edit config files directly"
+            )
+
+    return lines
 
 
 def _collect_env_vars(
@@ -749,6 +836,15 @@ def _format_op_match(
     match: Optional[OpMatch],
 ) -> List[str]:
     """Format a single 1Password match result as markdown lines."""
+    if match and match.status == "unchecked":
+        return [
+            f"- `{var_name}`: **NOT CHECKED** — 1Password was "
+            "not queried (dry-run or `op` unavailable). Search "
+            "manually before proceeding:",
+            f"  `op item list --format json | "
+            f'grep -i "{var_name}"`',
+        ]
+
     if not match or match.status == "missing":
         return [
             f"- `{var_name}`: **NOT FOUND** in 1Password. "
@@ -879,21 +975,62 @@ def _section_env_rewrite(
         name = var_info["name"]
         lines.extend(_format_op_match(name, enrichment.get(name)))
 
+    all_unchecked = all(
+        enrichment.get(v["name"])
+        and enrichment[v["name"]].status == "unchecked"
+        for v in all_vars
+    )
+
+    if all_unchecked:
+        op_step_text = (
+            "2. **Check 1Password for existing items.** Each "
+            "secret above was NOT CHECKED — verify whether it "
+            "already exists before creating new items. Only "
+            "store secrets that are genuinely missing. Verify "
+            'with `op read "op://..."`.'
+        )
+    else:
+        op_step_text = (
+            "2. **Create missing 1Password items.** For each "
+            "secret marked NOT FOUND above, store the current "
+            "plaintext value in 1Password. Verify with "
+            '`op read "op://..."`.'
+        )
+    op_syntax_lines = [
+        "",
+        "   Create a new item:",
+        "   ```",
+        "   op item create --vault \"VaultName\" "
+        "--category \"API Credential\" "
+        "--title \"Name\" 'credential=value'",
+        "   ```",
+        "   Add a field to an existing item:",
+        "   ```",
+        "   op item edit \"ItemTitle\" --vault \"VaultName\" "
+        "'new-field=value'",
+        "   ```",
+    ]
+
     lines.extend(
         [
             "",
             "**What to do**",
             "",
-            "1. **Create missing 1Password items.** For each secret "
-            "marked NOT FOUND above, store the current plaintext "
-            "value in 1Password. Verify with "
-            '`op read "op://..."`.',
+            f"1. **Find what consumes `{_basename(path)}`.** "
+            "Search the project for `dotenv` / `load_dotenv` "
+            "imports, `docker-compose.yml` `env_file:` directives, "
+            "shell scripts that `source` this file, Makefile "
+            "targets, and framework-specific env loading. This "
+            "informs the `op run` setup in step 5.",
             "",
-            f"2. **Back up the original file.** Copy "
+            op_step_text,
+            *op_syntax_lines,
+            "",
+            f"3. **Back up the original file.** Copy "
             f"`{_basename(path)}` to "
             f"`{_basename(path)}.plaintext.bak`.",
             "",
-            "3. **Rewrite the file.** Replace each secret value "
+            "4. **Rewrite the file.** Replace each secret value "
             "with its `op://` reference. Preserve all comments, "
             "non-secret lines, and formatting. Example:",
             "   ```",
@@ -912,13 +1049,7 @@ def _section_env_rewrite(
         [
             "   ```",
             "",
-            f"4. **Find what consumes `{_basename(path)}`.** "
-            "Search the project for `dotenv` / `load_dotenv` "
-            "imports, `docker-compose.yml` `env_file:` directives, "
-            "shell scripts that `source` this file, Makefile "
-            "targets, and framework-specific env loading.",
-            "",
-            "5. **Set up `op run`.** Based on step 4:",
+            "5. **Set up `op run`.** Based on step 1:",
             "   ```",
             f"   op run --env-file {path} -- <the-command>",
             "   ```",
@@ -978,6 +1109,12 @@ def _section_profile_rewrite(
             "1. **Ensure the value is in 1Password.** If not found "
             "above, store it manually before removing it from the "
             "profile.",
+            "",
+            "   ```",
+            "   op item create --vault \"VaultName\" "
+            "--category \"API Credential\" "
+            "--title \"Name\" 'credential=value'",
+            "   ```",
             "",
             f"2. **Remove the export line** from `{path}`. Do not "
             "comment it out — delete it entirely.",
@@ -1067,6 +1204,42 @@ def _section_env_var_trace(
     return "\n".join(lines)
 
 
+def _ssh_op_import_steps(path: str) -> List[str]:
+    """Return the 1Password SSH import instruction lines."""
+    return [
+        "",
+        "   **Important:** SSH key import requires the "
+        "1Password desktop app — the CLI cannot import "
+        "existing keys.",
+        "   `op item create --ssh-generate-key` only "
+        "generates new keys; it cannot import.",
+        "",
+        "   Steps:",
+        "   1. Open 1Password desktop app → vault → "
+        "+ → SSH Key → Import",
+        f"   2. Select `{path}`",
+        "   3. Verify the key is served by the agent:",
+        "      ```",
+        '      SSH_AUTH_SOCK="$HOME/Library/Group Containers'
+        '/2BUA8C4S2C.com.1password/t/agent.sock" ssh-add -l',
+        "      ```",
+        f"   4. Once confirmed, delete the private key: "
+        f"`rm {path}`",
+        "      (keep the `.pub` file — it is not sensitive)",
+    ]
+
+
+def _ssh_dependent_checklist() -> List[str]:
+    """Return the SSH key dependent-services checklist."""
+    return [
+        "   - `~/.ssh/config` for `IdentityFile` entries",
+        "   - Git remote URLs that use SSH",
+        "   - CI/CD pipelines or deploy scripts",
+        "   - Cron jobs or automation that SSH to remote hosts",
+        "",
+    ]
+
+
 def _section_ssh_harden(
     num: int,
     findings: List[NormalizedFinding],
@@ -1102,6 +1275,19 @@ def _section_ssh_harden(
         lines.append(f"- **Permissions:** {permissions}")
     lines.append(f"- **Severity:** {severity}")
 
+    op_ssh_active = _detect_op_ssh_agent()
+
+    lines.extend(["", "**Pre-conditions detected:**", ""])
+    if op_ssh_active:
+        lines.append(
+            "- 1Password SSH agent: **active** "
+            f"(`{OP_SSH_AGENT_SOCK}`)"
+        )
+    else:
+        lines.append(
+            "- 1Password SSH agent: not detected"
+        )
+
     lines.extend(["", "**What to do**", ""])
 
     step = 1
@@ -1114,43 +1300,58 @@ def _section_ssh_harden(
         lines.append("")
         step += 1
 
-    if encrypted is False:
-        lines.append(f"{step}. **Add a passphrase:**")
-        lines.append("   ```")
-        lines.append(f"   ssh-keygen -p -f {path}")
-        lines.append("   ```")
+    if op_ssh_active:
+        # Tier 1: 1Password SSH agent is already set up.
+        # Lead with import, skip passphrase+Keychain.
+        lines.append(
+            f"{step}. **Import into 1Password SSH agent.** "
+            "The agent is already active on this machine — "
+            "this is the recommended path."
+        )
+        lines.extend(_ssh_op_import_steps(path))
         lines.append("")
         step += 1
 
         lines.append(
-            f"{step}. **Store the passphrase in macOS Keychain:**"
+            f"{step}. **Check which services use this key.** "
+            "Look at:"
         )
-        lines.append("   ```")
-        lines.append(f"   ssh-add --apple-use-keychain {path}")
-        lines.append("   ```")
-        lines.append("")
+        lines.extend(_ssh_dependent_checklist())
+        step += 1
+    else:
+        # Tier 2: No 1P agent; passphrase + Keychain first.
+        if encrypted is False:
+            lines.append(f"{step}. **Add a passphrase:**")
+            lines.append("   ```")
+            lines.append(f"   ssh-keygen -p -f {path}")
+            lines.append("   ```")
+            lines.append("")
+            step += 1
+
+            lines.append(
+                f"{step}. **Store the passphrase in "
+                "macOS Keychain:**"
+            )
+            lines.append("   ```")
+            lines.append(
+                f"   ssh-add --apple-use-keychain {path}"
+            )
+            lines.append("   ```")
+            lines.append("")
+            step += 1
+
+        lines.append(
+            f"{step}. **Check which services use this key.** "
+            "Look at:"
+        )
+        lines.extend(_ssh_dependent_checklist())
         step += 1
 
-    lines.append(
-        f"{step}. **Check which services use this key.** Look at:"
-    )
-    lines.extend(
-        [
-            "   - `~/.ssh/config` for `IdentityFile` entries",
-            "   - Git remote URLs that use SSH",
-            "   - CI/CD pipelines or deploy scripts",
-            "   - Cron jobs or automation that SSH to remote hosts",
-            "",
-        ]
-    )
-    step += 1
-
-    lines.append(
-        f"{step}. **Consider 1Password SSH agent.** This eliminates "
-        "the key file from disk entirely. The private key lives "
-        "only in 1Password and is served via the 1Password SSH "
-        "agent."
-    )
+        lines.append(
+            f"{step}. **Consider 1Password SSH agent.** "
+            "This eliminates the key file from disk entirely."
+        )
+        lines.extend(_ssh_op_import_steps(path))
 
     return "\n".join(lines)
 
@@ -1193,6 +1394,370 @@ def _section_incident_response(
     return "\n".join(lines)
 
 
+def _section_git_credential_store(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for git credential store remediation."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+
+    lines = [
+        f"### {num}. Migrate git credentials from "
+        f"`{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+        "1. **Switch to macOS Keychain credential helper:**",
+        "   ```",
+        "   git config --global --unset-all credential.helper",
+        "   git config --global credential.helper osxkeychain",
+        "   ```",
+        "",
+        "2. **Delete the plaintext credential file:**",
+        f"   ```",
+        f"   rm {path}",
+        f"   ```",
+        "",
+        "3. **Clear cached Keychain entries** (forces "
+        "re-authentication):",
+        "   ```",
+        "   printf 'host=github.com\\nprotocol=https\\n\\n'"
+        " | git credential-osxkeychain erase",
+        "   ```",
+        "",
+        "4. **Verify by cloning or pulling** a private repo "
+        "to trigger the Keychain credential prompt.",
+        "",
+        "5. **Alternative: use GitHub CLI** for a smoother "
+        "OAuth flow:",
+        "   ```",
+        "   gh auth login",
+        "   gh auth setup-git",
+        "   ```",
+    ]
+
+    return "\n".join(lines)
+
+
+def _detect_cloud_provider(path: str) -> str:
+    """Guess the cloud provider from the finding path."""
+    lower = path.lower()
+    if ".aws" in lower or "aws" in lower:
+        return "aws"
+    if "gcloud" in lower or "gcp" in lower:
+        return "gcp"
+    if "azure" in lower or ".azure" in lower:
+        return "azure"
+    return "unknown"
+
+
+def _section_cloud_migrate(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for cloud credential migration."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+    provider = _detect_cloud_provider(path)
+
+    lines = [
+        f"### {num}. Remediate cloud credentials at "
+        f"`{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Provider:** {provider}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+    ]
+
+    if provider == "aws":
+        lines.extend(
+            [
+                "1. **Switch to AWS SSO:**",
+                "   ```",
+                "   aws configure sso",
+                "   aws sso login --profile <profile>",
+                "   ```",
+                "",
+                "2. **Delete static access keys** from the "
+                "AWS console (IAM → Users → Security "
+                "credentials → Delete access key).",
+                "",
+                "3. **Remove the local credentials file:**",
+                f"   `rm {path}`",
+                "",
+                "4. **Unset environment variables** if set: "
+                "`AWS_ACCESS_KEY_ID`, "
+                "`AWS_SECRET_ACCESS_KEY`, "
+                "`AWS_SESSION_TOKEN`.",
+            ]
+        )
+    elif provider == "gcp":
+        lines.extend(
+            [
+                "1. **Revoke application default credentials:**",
+                "   ```",
+                "   gcloud auth application-default revoke",
+                "   ```",
+                "",
+                "2. **Use `gcloud auth login`** for "
+                "interactive work. For service accounts, use "
+                "workload identity federation instead of "
+                "downloaded key files.",
+                "",
+                "3. **If the file is a service account key,** "
+                "delete it from the GCP console (IAM → "
+                "Service accounts → Keys → Delete) and "
+                f"remove: `rm {path}`",
+            ]
+        )
+    elif provider == "azure":
+        lines.extend(
+            [
+                "1. **Re-authenticate with device code "
+                "flow:**",
+                "   ```",
+                "   az login",
+                "   ```",
+                "",
+                "2. **Clear cached tokens:**",
+                "   ```",
+                "   az account clear",
+                "   ```",
+                "",
+                "3. **For service principals,** rotate the "
+                "client secret in the Azure portal and use "
+                "managed identity where possible.",
+            ]
+        )
+    else:
+        lines.append(findings[0].remediation)
+
+    guide = GUIDE_MAP.get("cloud_credentials", "index.md")
+    lines.extend(
+        [
+            "",
+            "See the full remediation guide at "
+            f"`{SCRIPT_DIR}/docs/guides/{guide}`.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def _section_kubeconfig_migrate(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for kubeconfig credential migration."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+    kubectl_available = shutil.which("kubectl") is not None
+
+    lines = [
+        f"### {num}. Secure kubeconfig at `{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+    ]
+    if not kubectl_available:
+        lines.append(
+            "- **Note:** `kubectl` is not installed — "
+            "edit the config file directly"
+        )
+
+    lines.extend(["", "**What to do**", ""])
+
+    lines.extend(
+        [
+            "1. **Switch to exec-based auth plugins.** "
+            "These generate short-lived tokens instead of "
+            "storing static credentials:",
+            "   - **AWS EKS:** "
+            "`aws eks update-kubeconfig --name <CLUSTER>`",
+            "   - **GKE:** `gcloud container clusters "
+            "get-credentials <CLUSTER>`",
+            "   - **AKS:** `az aks get-credentials "
+            "--resource-group <RG> --name <CLUSTER>` "
+            "then `kubelogin convert-kubeconfig -l azurecli`",
+            "",
+            "2. **Remove stale contexts and users** with "
+            "embedded credentials:",
+        ]
+    )
+
+    if kubectl_available:
+        lines.extend(
+            [
+                "   ```",
+                "   kubectl config delete-context "
+                "<STALE_CONTEXT>",
+                "   kubectl config unset users.<STALE_USER>",
+                "   ```",
+            ]
+        )
+    else:
+        lines.append(
+            "   Edit `{path}` directly: remove `user:` "
+            "entries that contain `client-certificate-data` "
+            "or `client-key-data` fields.".format(path=path)
+        )
+
+    lines.extend(
+        [
+            "",
+            "3. **Fix file permissions:**",
+            f"   `chmod 600 {path}`",
+            "",
+            "4. **Verify no embedded credentials remain** "
+            "by inspecting the `users:` section of the "
+            "config for `token:`, `client-key-data:`, or "
+            "`password:` fields.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def _section_token_migrate(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for package manager token migration."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+    basename = _basename(path)
+
+    lines = [
+        f"### {num}. Migrate token in `{basename}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+    ]
+
+    lower = path.lower()
+    if ".npmrc" in lower:
+        lines.extend(
+            [
+                "1. **Remove the token from `.npmrc`:**",
+                "   Delete or comment out the "
+                "`//registry.npmjs.org/:_authToken=` line.",
+                "",
+                "2. **Use `npm login` instead** — this "
+                "stores credentials in the OS keychain on "
+                "macOS.",
+                "",
+                "3. **For CI, use `NPM_TOKEN` env var** "
+                "injected from 1Password or a secrets "
+                "manager, not a static `.npmrc`.",
+            ]
+        )
+    elif ".pypirc" in lower or "pip" in lower:
+        lines.extend(
+            [
+                "1. **Remove tokens from `.pypirc`.**",
+                "",
+                "2. **Use `keyring` for PyPI uploads:**",
+                "   ```",
+                "   pip install keyring",
+                "   keyring set https://upload.pypi.org/"
+                "legacy/ __token__",
+                "   ```",
+                "",
+                "3. **For CI, use trusted publishers** "
+                "(OIDC) instead of API tokens.",
+            ]
+        )
+    elif "docker" in lower:
+        lines.extend(
+            [
+                "1. **Use `docker login`** — on macOS this "
+                "stores credentials in the Keychain via "
+                "the `osxkeychain` credential helper.",
+                "",
+                "2. **Remove plaintext auth** from "
+                f"`{path}` — delete the `auths` section "
+                "containing base64-encoded credentials.",
+                "",
+                "3. **Verify credential helper is active:**",
+                "   `docker-credential-osxkeychain list`",
+            ]
+        )
+    else:
+        lines.append(findings[0].remediation)
+        lines.extend(
+            [
+                "",
+                "Move the token to 1Password or the "
+                "platform's native credential store, then "
+                "delete the plaintext file.",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def _section_wallet_secure(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for cryptocurrency wallet security."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+
+    lines = [
+        f"### {num}. Secure wallet at `{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+        "1. **Ensure FileVault full-disk encryption is "
+        "enabled:**",
+        "   ```",
+        "   fdesetup status",
+        "   ```",
+        "   If not active: `sudo fdesetup enable`",
+        "",
+        "2. **Move funds to a hardware wallet** (Ledger, "
+        "Trezor) if the balance is non-trivial. Keep only "
+        "operational minimums in hot wallets.",
+        "",
+        "3. **For Solana keypairs,** switch to hardware "
+        "wallet delegation:",
+        "   `solana config set --keypair usb://ledger`",
+        "",
+        "4. **Back up the wallet** to an encrypted "
+        "medium (1Password document, encrypted USB) "
+        "before making changes.",
+        "",
+        "5. **Restrict file permissions:**",
+        f"   `chmod 600 {path}`",
+    ]
+
+    return "\n".join(lines)
+
+
 def _section_generic(
     num: int,
     findings: List[NormalizedFinding],
@@ -1200,6 +1765,9 @@ def _section_generic(
 ) -> str:
     """Subtask section for categories without specialized templates."""
     nf = findings[0]
+
+    guide = GUIDE_MAP.get(nf.category, "index.md")
+    guide_path = f"{SCRIPT_DIR}/docs/guides/{guide}"
 
     lines = [
         f"### {num}. Address {nf.category} finding",
@@ -1213,8 +1781,8 @@ def _section_generic(
         "",
         nf.remediation,
         "",
-        "Review the clawback documentation for this category "
-        "for detailed remediation steps.",
+        f"See the remediation guide at `{guide_path}` for "
+        "detailed steps.",
     ]
 
     return "\n".join(lines)
@@ -1225,13 +1793,21 @@ SECTION_COMPILERS = {
     "profile_rewrite": _section_profile_rewrite,
     "env_var_trace": _section_env_var_trace,
     "ssh_harden": _section_ssh_harden,
+    "git_credential_store": _section_git_credential_store,
+    "cloud_migrate": _section_cloud_migrate,
+    "kubeconfig_migrate": _section_kubeconfig_migrate,
+    "token_migrate": _section_token_migrate,
+    "wallet_secure": _section_wallet_secure,
 }
 
 
 # ── Task file compilation ────────────────────────────────────────────
 
 
-def compile_task_file(unit: WorkUnit) -> str:
+def compile_task_file(
+    unit: WorkUnit,
+    pack_path: Optional[str] = None,
+) -> str:
     """Compile a WorkUnit into a complete agent-ready task file."""
     if all(
         nf.fix_type == "incident_response"
@@ -1265,10 +1841,11 @@ def compile_task_file(unit: WorkUnit) -> str:
             "Out of scope: findings in other repositories or "
             "unrelated system areas.",
             "",
-            "## Findings",
-            "",
         ]
     )
+
+    lines.extend(_gather_environment_lines(unit))
+    lines.extend(["", "## Findings", ""])
 
     cats: Dict[str, List[NormalizedFinding]] = {}
     for nf in unit.findings:
@@ -1313,11 +1890,21 @@ def compile_task_file(unit: WorkUnit) -> str:
             if not nf.path.startswith("env:")
         )
     )
-    lines.append("Run a full clawback scan and check that ")
-    lines.append("the findings for these paths are resolved:")
+    categories = sorted(set(nf.category for nf in unit.findings))
+    lines.append(
+        "Run a targeted clawback scan and check that "
+        "the findings for these paths are resolved:"
+    )
     lines.append("")
-    lines.append("```")
-    lines.append("clawback.py --json")
+    lines.append("```bash")
+    lines.append(f"cd {SCRIPT_DIR}")
+    if len(categories) == 1:
+        lines.append(
+            f"uv run python clawback.py "
+            f"--category {categories[0]} --pretty"
+        )
+    else:
+        lines.append("uv run python clawback.py --pretty")
     lines.append("```")
     if ver_paths:
         lines.append("")
@@ -1325,12 +1912,16 @@ def compile_task_file(unit: WorkUnit) -> str:
         for p in ver_paths:
             lines.append(f"- `{p}`")
 
+    if pack_path:
+        index_ref = f"`{pack_path}/index.md`"
+    else:
+        index_ref = "`index.md`"
     lines.extend(
         [
             "",
             "## Pack status",
             "",
-            "Update the checkbox for this task in `index.md` "
+            f"Update the checkbox for this task in {index_ref} "
             "when complete.",
         ]
     )
@@ -1457,8 +2048,8 @@ def compile_index(
         )
 
         lines.append(
-            "  - Verify: `clawback.py --json` "
-            "(check affected paths)"
+            f"  - Verify: `cd {SCRIPT_DIR} && "
+            "uv run python clawback.py --pretty`"
         )
 
         if is_ir:
@@ -1528,7 +2119,7 @@ def compile_metadata(
             "## Staleness Warning",
             "",
             "This pack reflects the scan state at the time of "
-            "generation. A newer `clawback.py --json` scan may "
+            "generation. A newer clawback scan may "
             "find different results. Regenerate the pack after "
             "significant remediation work.",
         ]
@@ -1619,7 +2210,9 @@ def generate_pack(
         task_filename = f"{unit.id}.md"
         task_path = tasks_dir / task_filename
         task_path.write_text(
-            compile_task_file(unit) + "\n", encoding="utf-8"
+            compile_task_file(unit, pack_path=str(pack))
+            + "\n",
+            encoding="utf-8",
         )
 
         # Incident-response units are human-only: no launchers.

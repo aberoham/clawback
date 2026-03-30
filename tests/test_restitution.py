@@ -606,16 +606,34 @@ class TestSubtaskSections:
         assert "GH_TOKEN" in md
         assert "**What to investigate**" in md
 
-    def test_ssh_harden_section(self):
+    def test_ssh_harden_section_no_op_agent(self):
         nfs = [normalize_finding(_ssh_finding())]
         enrichment = {}
-        md = compile_subtask_section(
-            1, "ssh_harden", nfs, enrichment
-        )
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=False,
+        ):
+            md = compile_subtask_section(
+                1, "ssh_harden", nfs, enrichment
+            )
         assert "### 1." in md
         assert "chmod 600" in md
         assert "ssh-keygen -p" in md
         assert "ssh-add --apple-use-keychain" in md
+
+    def test_ssh_harden_with_op_agent_leads_tier1(self):
+        nfs = [normalize_finding(_ssh_finding())]
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=True,
+        ):
+            md = compile_subtask_section(
+                1, "ssh_harden", nfs, {}
+            )
+        assert "1Password SSH agent" in md
+        assert "agent is already active" in md
+        assert "desktop app" in md
+        assert "ssh-keygen -p" not in md
 
     def test_ssh_encrypted_skips_passphrase(self):
         nfs = [
@@ -623,9 +641,13 @@ class TestSubtaskSections:
                 _ssh_finding(encrypted=True, permissions="0o644")
             )
         ]
-        md = compile_subtask_section(
-            1, "ssh_harden", nfs, {}
-        )
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=False,
+        ):
+            md = compile_subtask_section(
+                1, "ssh_harden", nfs, {}
+            )
         assert "chmod 600" in md
         assert "ssh-keygen -p" not in md
 
@@ -637,9 +659,13 @@ class TestSubtaskSections:
                 )
             )
         ]
-        md = compile_subtask_section(
-            1, "ssh_harden", nfs, {}
-        )
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=False,
+        ):
+            md = compile_subtask_section(
+                1, "ssh_harden", nfs, {}
+            )
         assert "chmod 600" not in md
         assert "ssh-keygen -p" in md
 
@@ -652,7 +678,7 @@ class TestSubtaskSections:
         assert "Isolate" in md
         assert "Do not attempt automated remediation" in md
 
-    def test_generic_section(self):
+    def test_wallet_secure_section(self):
         raw = {
             "category": "crypto_wallets",
             "path": "/wallets/bitcoin",
@@ -665,8 +691,107 @@ class TestSubtaskSections:
         md = compile_subtask_section(
             1, "wallet_secure", nfs, {}
         )
-        assert "crypto_wallets" in md
-        assert "Encrypt the wallet." in md
+        assert "Secure wallet" in md
+        assert "FileVault" in md
+        assert "chmod 600" in md
+
+    def test_generic_section_fallback(self):
+        raw = {
+            "category": "unknown_category",
+            "path": "/some/path",
+            "severity": "medium",
+            "description": "Unknown finding",
+            "remediation": "Investigate manually.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(
+            1, "generic", nfs, {}
+        )
+        assert "unknown_category" in md
+        assert "Investigate manually." in md
+        assert "remediation guide" in md
+
+    def test_git_credential_store_section(self):
+        raw = {
+            "category": "git_credentials",
+            "path": "/Users/test/.git-credentials",
+            "severity": "high",
+            "description": "Plaintext git credentials",
+            "remediation": "Switch to credential helper.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(
+            1, "git_credential_store", nfs, {}
+        )
+        assert "osxkeychain" in md
+        assert "rm " in md
+        assert "gh auth login" in md
+
+    def test_cloud_migrate_aws(self):
+        raw = {
+            "category": "cloud_credentials",
+            "path": "/Users/test/.aws/credentials",
+            "severity": "high",
+            "description": "AWS credentials file",
+            "remediation": "Use AWS SSO.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(
+            1, "cloud_migrate", nfs, {}
+        )
+        assert "aws" in md.lower()
+        assert "SSO" in md
+
+    def test_cloud_migrate_gcp(self):
+        raw = {
+            "category": "cloud_credentials",
+            "path": "/Users/test/.config/gcloud/adc.json",
+            "severity": "high",
+            "description": "GCP ADC",
+            "remediation": "Revoke ADC.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(
+            1, "cloud_migrate", nfs, {}
+        )
+        assert "gcloud" in md
+        assert "revoke" in md.lower()
+
+    def test_kubeconfig_migrate_section(self):
+        raw = {
+            "category": "kubernetes",
+            "path": "/Users/test/.kube/config",
+            "severity": "medium",
+            "description": "Kubeconfig with embedded creds",
+            "remediation": "Use exec-based auth.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(
+            1, "kubeconfig_migrate", nfs, {}
+        )
+        assert "exec-based auth" in md
+        assert "chmod 600" in md
+
+    def test_token_migrate_npm(self):
+        raw = {
+            "category": "package_manager_tokens",
+            "path": "/Users/test/.npmrc",
+            "severity": "high",
+            "description": "npm token in .npmrc",
+            "remediation": "Use npm login.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(
+            1, "token_migrate", nfs, {}
+        )
+        assert "npmrc" in md.lower() or "npm" in md.lower()
+        assert "npm login" in md
 
 
 # ── Task file compilation ────────────────────────────────────────────
@@ -723,12 +848,14 @@ class TestTaskFile:
         )
         assert not _is_incident_response(unit)
 
-    def test_verification_uses_json_not_scan_path(self):
+    def test_verification_uses_correct_command(self):
         unit = _make_work_unit(
             [_env_finding("/project/.env", ["K"])]
         )
         md = compile_task_file(unit)
-        assert "clawback.py --json" in md
+        assert "uv run python clawback.py" in md
+        assert "--pretty" in md
+        assert "--json" not in md
         assert "--scan-path" not in md
 
     def test_verification_lists_affected_paths(self):
@@ -770,7 +897,7 @@ class TestPackCompilation:
         assert "tasks/" in md
         assert "launch/" in md
 
-    def test_index_no_scan_path_flag(self):
+    def test_index_uses_correct_verify_command(self):
         unit = _make_work_unit(
             [_env_finding("/project/.env", ["K"])]
         )
@@ -779,7 +906,8 @@ class TestPackCompilation:
         )
         md = compile_index([unit], report, "/tmp/pack")
         assert "--scan-path" not in md
-        assert "clawback.py --json" in md
+        assert "--json" not in md
+        assert "uv run python clawback.py --pretty" in md
 
     def test_index_ir_unit_has_no_launcher(self):
         unit = _make_work_unit(
@@ -995,7 +1123,7 @@ class TestEnrichment:
             )
             mock_run.assert_not_called()
         assert "K" in unit.enrichment
-        assert unit.enrichment["K"].status == "missing"
+        assert unit.enrichment["K"].status == "unchecked"
 
     def test_op_unavailable_uses_placeholders(self):
         unit = _make_work_unit(
@@ -1009,7 +1137,7 @@ class TestEnrichment:
             enrich_work_units(
                 [unit], vault=None, dry_run=False
             )
-        assert unit.enrichment["K"].status == "missing"
+        assert unit.enrichment["K"].status == "unchecked"
 
     def test_op_unauthenticated_uses_placeholders(self):
         unit = _make_work_unit(
@@ -1026,7 +1154,22 @@ class TestEnrichment:
             enrich_work_units(
                 [unit], vault=None, dry_run=False
             )
-        assert unit.enrichment["K"].status == "missing"
+        assert unit.enrichment["K"].status == "unchecked"
+
+    def test_unchecked_enrichment_renders_not_checked(self):
+        nfs = [
+            normalize_finding(
+                _env_finding("/project/.env", ["SECRET_KEY"])
+            )
+        ]
+        enrichment = {"SECRET_KEY": OpMatch(status="unchecked")}
+        section = compile_subtask_section(
+            1, "env_rewrite", nfs, enrichment
+        )
+        assert "**NOT CHECKED**" in section
+        assert "**NOT FOUND**" not in section
+        assert "NOT CHECKED" in section
+        assert "Check 1Password for existing items" in section
 
 
 # ── Stdout summary ───────────────────────────────────────────────────
