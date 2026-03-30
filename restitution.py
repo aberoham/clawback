@@ -223,6 +223,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip 1Password queries; use placeholder enrichment",
     )
     p.add_argument(
+        "--preview",
+        action="store_true",
+        help="Print task details inline for operator triage",
+    )
+    p.add_argument(
+        "--tmux",
+        action="store_true",
+        help=(
+            "Create a tmux session with one window per task"
+        ),
+    )
+    p.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {VERSION}",
@@ -483,6 +495,11 @@ def check_op_available() -> bool:
 def check_op_authenticated() -> bool:
     """Return True if op is authenticated."""
     return _run_op(["whoami", "--format", "json"]) is not None
+
+
+def check_tmux_available() -> bool:
+    """Return True if tmux is installed."""
+    return shutil.which("tmux") is not None
 
 
 def op_vault_list() -> List[str]:
@@ -1532,7 +1549,12 @@ def compile_claude_launcher(
     unit: WorkUnit,
     pack_path: str,
 ) -> str:
-    """Generate a reviewable Claude Code launcher script."""
+    """Generate a Claude Code launcher script.
+
+    Displays the task prompt so the operator can review it, waits
+    for confirmation, then starts an interactive Claude session in
+    plan mode. Works both standalone and inside a tmux window.
+    """
     task_path = f"{pack_path}/tasks/{unit.id}.md"
     lines = [
         "#!/usr/bin/env bash",
@@ -1540,8 +1562,13 @@ def compile_claude_launcher(
         "",
         f'cd "{unit.root_path}"',
         "",
-        "echo 'Review and run:'",
-        f"echo 'claude -p \"$(cat \"{task_path}\")\"'",
+        f'cat "{task_path}"',
+        "echo ''",
+        "read -r -p 'Press Enter to start Claude Code"
+        " in plan mode...'",
+        "",
+        f'exec claude --permission-mode plan'
+        f' "$(cat "{task_path}")"',
         "",
     ]
     return "\n".join(lines)
@@ -1633,6 +1660,162 @@ def default_pack_dir() -> str:
     """Return a timestamped default pack directory path."""
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     return os.path.join("tmp", "restitution-packs", ts)
+
+
+def print_preview(units: List[WorkUnit]) -> None:
+    """Print inline task details for operator triage."""
+    for unit in units:
+        is_ir = _is_incident_response(unit)
+        wtype = (
+            "repo" if unit.work_type == "repo"
+            else "standalone"
+        )
+        sev_str = unit.severity
+        if unit.severity == "critical":
+            sev_str = red(unit.severity)
+        elif unit.severity == "high":
+            sev_str = yellow(unit.severity)
+
+        print(
+            f"  {bold(unit.id)}  [{sev_str}] [{wtype}]",
+            file=sys.stderr,
+        )
+        print(
+            dim(f"  {unit.root_path}"),
+            file=sys.stderr,
+        )
+        if is_ir:
+            print(
+                red(
+                    "  INCIDENT RESPONSE — human-only,"
+                    " no agent launcher"
+                ),
+                file=sys.stderr,
+            )
+        for nf in unit.findings:
+            print(
+                f"    {nf.description}",
+                file=sys.stderr,
+            )
+        print("", file=sys.stderr)
+
+
+def create_tmux_session(
+    units: List[WorkUnit],
+    pack_path: str,
+    session_name: str,
+) -> None:
+    """Create a tmux session with one window per launchable task.
+
+    Each window displays the task prompt and waits for the operator
+    to press Enter before starting Claude Code in plan mode.
+    """
+    launchable = [
+        u for u in units if not _is_incident_response(u)
+    ]
+    if not launchable:
+        print(
+            yellow(
+                "No launchable tasks — "
+                "skipping tmux session."
+            ),
+            file=sys.stderr,
+        )
+        return
+
+    if not check_tmux_available():
+        _fatal(
+            "tmux is not installed. "
+            "Install with: brew install tmux"
+        )
+
+    first = launchable[0]
+    launcher = f"{pack_path}/launch/{first.id}-claude.sh"
+    try:
+        subprocess.run(
+            [
+                "tmux", "new-session",
+                "-d",
+                "-s", session_name,
+                "-n", first.id,
+                "-c", first.root_path,
+                f"bash {launcher}",
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        _fatal(f"Failed to create tmux session: {exc}")
+
+    for unit in launchable[1:]:
+        launcher = (
+            f"{pack_path}/launch/{unit.id}-claude.sh"
+        )
+        try:
+            subprocess.run(
+                [
+                    "tmux", "new-window",
+                    "-t", session_name,
+                    "-n", unit.id,
+                    "-c", unit.root_path,
+                    f"bash {launcher}",
+                ],
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            print(
+                yellow(
+                    f"  Warning: could not create window"
+                    f" for {unit.id}: {exc}"
+                ),
+                file=sys.stderr,
+            )
+
+    subprocess.run(
+        [
+            "tmux", "select-window",
+            "-t", f"{session_name}:0",
+        ],
+        check=False,
+    )
+
+    print("", file=sys.stderr)
+    print(
+        bold(
+            f"tmux session '{session_name}' created"
+            f" with {len(launchable)} window(s)."
+        ),
+        file=sys.stderr,
+    )
+    print("", file=sys.stderr)
+
+    if os.environ.get("TMUX"):
+        print(
+            "  Already inside tmux. Switch with:",
+            file=sys.stderr,
+        )
+        print(
+            f"    tmux switch-client -t {session_name}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "  Connect with:",
+            file=sys.stderr,
+        )
+        print(
+            f"    tmux attach -t {session_name}",
+            file=sys.stderr,
+        )
+
+    print("", file=sys.stderr)
+    print(
+        dim(
+            "  Each window shows the task prompt."
+            " Press Enter to start Claude."
+        ),
+        file=sys.stderr,
+    )
+    print("", file=sys.stderr)
 
 
 # ── Stdout summary ───────────────────────────────────────────────────
@@ -1827,6 +2010,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print_pack_summary(
         pack_path, units, findings, op_available, op_authenticated
     )
+
+    if args.preview:
+        print_preview(units)
+
+    if args.tmux:
+        session_name = (
+            f"restitution-{pathlib.Path(pack_path).name}"
+        )
+        create_tmux_session(units, pack_path, session_name)
 
     return 0
 
