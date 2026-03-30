@@ -1,5 +1,30 @@
 # clawback
 
+## Quick start
+
+```bash
+# Scan this machine
+curl -fsSL https://raw.githubusercontent.com/aberoham/clawback/main/clawback.py | python3 - --pretty
+```
+
+Or clone and remediate:
+
+```bash
+git clone https://github.com/aberoham/clawback.git && cd clawback
+
+# Scan
+python3 clawback.py --quiet --output-file tmp/scan.json
+
+# See what needs fixing
+python3 restitution.py -i tmp/scan.json --preview --dry-run
+
+# Launch remediation sessions (requires tmux + Claude Code)
+python3 restitution.py -i tmp/scan.json --tmux
+tmux attach -t restitution-<timestamp>
+```
+
+## What is this
+
 `clawback` is a small macOS secret exposure scanner written as a single Python file.
 
 It exists for a very specific reason: most secret scanners are built to search source code for hardcoded secrets. That is useful, but it is not the same problem as asking, "what static credentials and credential files are sitting on a developer workstation right now, ready for the next supply chain compromise to steal?"
@@ -132,28 +157,24 @@ For early rollout, the sensible approach is:
 
 `restitution.py` is the companion remediation tool. It consumes clawback JSON output and generates a **remediation pack**: an ordered set of agent-ready markdown tasks, an operator-facing index, and reviewable launcher scripts.
 
-### Quick start
-
-```bash
-python3 clawback.py --json > scan.json
-python3 restitution.py -i scan.json
-```
-
-This creates a timestamped pack under `./tmp/restitution-packs/<timestamp>/` containing:
-
-- `index.md` — operator dashboard with execution checklist
-- `metadata.md` — scan provenance and staleness warning
-- `tasks/*.md` — one self-contained agent prompt per work unit
-- `launch/*.sh` — reviewable Claude Code and Codex launcher scripts
-
 ### Workflow
 
-1. Run `clawback.py --json` to scan
-2. Run `restitution.py -i scan.json` to generate a pack
-3. Open `index.md` and work through the queue in order
-4. Feed each task file to Claude Code or another coding agent
-5. Mark progress via checkboxes in `index.md`
-6. Re-scan and regenerate after remediation to confirm findings are resolved
+```bash
+# 1. Scan
+python3 clawback.py --quiet --output-file scan.json
+
+# 2. Triage — review what needs fixing
+python3 restitution.py -i scan.json --preview --dry-run
+
+# 3. Remediate — launch Claude Code sessions in tmux
+python3 restitution.py -i scan.json --tmux
+tmux attach -t restitution-<timestamp>
+
+# 4. Re-scan to confirm findings are resolved
+python3 clawback.py --quiet --output-file scan2.json
+```
+
+Each tmux window shows the task prompt and waits for you to press Enter before starting Claude Code in plan mode. Cycle windows with `Ctrl-b n`.
 
 ### Options
 
@@ -164,6 +185,8 @@ This creates a timestamped pack under `./tmp/restitution-packs/<timestamp>/` con
 | `--vault` | Restrict 1Password enrichment to one vault |
 | `--category` | Process only one finding category |
 | `--dry-run` | Skip 1Password queries |
+| `--preview` | Print task details inline for triage |
+| `--tmux` | Create a tmux session with one window per task |
 | `--combined` | Emit combined markdown to stdout (legacy) |
 
 ### Grouping

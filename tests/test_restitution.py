@@ -17,12 +17,14 @@ from restitution import (
     WorkUnit,
     _is_incident_response,
     build_parser,
+    check_tmux_available,
     compile_claude_launcher,
     compile_codex_launcher,
     compile_index,
     compile_metadata,
     compile_subtask_section,
     compile_task_file,
+    create_tmux_session,
     default_pack_dir,
     detect_project_root,
     detect_work_area,
@@ -33,6 +35,7 @@ from restitution import (
     main,
     normalize_all,
     normalize_finding,
+    print_preview,
     validate_report,
     write_combined,
 )
@@ -821,8 +824,10 @@ class TestPackCompilation:
         sh = compile_claude_launcher(unit, "/tmp/pack")
         assert "#!/usr/bin/env bash" in sh
         assert 'cd "/project"' in sh
-        assert "claude -p" in sh
+        assert "claude --permission-mode plan" in sh
         assert "001-high-test.md" in sh
+        assert "read -r -p" in sh
+        assert "cat" in sh
 
     def test_codex_launcher_content(self):
         unit = _make_work_unit(
@@ -1144,3 +1149,171 @@ class TestCLI:
         p.write_text(json.dumps(report))
         rc = main(["--input", str(p), "--dry-run"])
         assert rc == 0
+
+
+# ── Preview mode ─────────────────────────────────────────────────────
+
+
+class TestPreview:
+    def test_preview_prints_task_details(self, capsys):
+        unit = _make_work_unit(
+            [_env_finding("/project/.env", ["SECRET_KEY"])],
+        )
+        print_preview([unit])
+        err = capsys.readouterr().err
+        assert "001-high-test" in err
+        assert "/project" in err
+        assert "SECRET_KEY" in err
+
+    def test_preview_marks_ir_units(self, capsys):
+        unit = _make_work_unit(
+            [_teampcp_finding()],
+            unit_id="001-critical-ioc",
+            label="ioc",
+        )
+        unit.findings[0] = normalize_finding(
+            _teampcp_finding()
+        )
+        print_preview([unit])
+        err = capsys.readouterr().err
+        assert "INCIDENT RESPONSE" in err
+        assert "human-only" in err
+
+
+# ── Tmux mode ────────────────────────────────────────────────────────
+
+
+class TestTmux:
+    def test_check_tmux_when_missing(self):
+        with patch("restitution.shutil.which", return_value=None):
+            assert check_tmux_available() is False
+
+    def test_check_tmux_when_present(self):
+        with patch(
+            "restitution.shutil.which", return_value="/usr/bin/tmux"
+        ):
+            assert check_tmux_available() is True
+
+    def test_no_session_when_all_ir(self, capsys):
+        unit = _make_work_unit(
+            [_teampcp_finding()],
+            unit_id="001-critical-ioc",
+            label="ioc",
+        )
+        with patch("restitution.subprocess.run") as mock_run:
+            create_tmux_session(
+                [unit], "/tmp/pack", "test-session"
+            )
+            mock_run.assert_not_called()
+        err = capsys.readouterr().err
+        assert "No launchable tasks" in err
+
+    def test_creates_windows(self, tmp_path):
+        units = []
+        pack = tmp_path / "pack"
+        launch_dir = pack / "launch"
+        launch_dir.mkdir(parents=True)
+        for i in range(3):
+            uid = f"{i + 1:03d}-high-proj{i}"
+            u = _make_work_unit(
+                [_env_finding(f"/proj{i}/.env", ["K"])],
+                unit_id=uid,
+                label=f"proj{i}",
+                root_path=f"/proj{i}",
+            )
+            units.append(u)
+            (launch_dir / f"{uid}-claude.sh").write_text(
+                "#!/usr/bin/env bash\n"
+            )
+
+        with patch("restitution.subprocess.run") as mock_run, \
+             patch(
+                 "restitution.check_tmux_available",
+                 return_value=True,
+             ):
+            create_tmux_session(
+                units, str(pack), "test-session"
+            )
+
+        calls = mock_run.call_args_list
+        new_session_calls = [
+            c for c in calls
+            if "new-session" in c.args[0]
+        ]
+        new_window_calls = [
+            c for c in calls
+            if "new-window" in c.args[0]
+        ]
+        assert len(new_session_calls) == 1
+        assert len(new_window_calls) == 2
+
+    def test_inside_tmux_suggests_switch(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+        unit = _make_work_unit(
+            [_env_finding("/project/.env", ["K"])],
+        )
+        pack = tmp_path / "pack"
+        launch_dir = pack / "launch"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "001-high-test-claude.sh").write_text(
+            "#!/usr/bin/env bash\n"
+        )
+
+        with patch("restitution.subprocess.run"), \
+             patch(
+                 "restitution.check_tmux_available",
+                 return_value=True,
+             ):
+            create_tmux_session(
+                [unit], str(pack), "test-session"
+            )
+
+        err = capsys.readouterr().err
+        assert "switch-client" in err
+
+    def test_launcher_path_quoted_for_spaces(self, tmp_path):
+        """Paths with spaces must be quoted in the tmux command."""
+        unit = _make_work_unit(
+            [_env_finding("/project/.env", ["K"])],
+        )
+        pack = tmp_path / "pack with spaces"
+        launch_dir = pack / "launch"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "001-high-test-claude.sh").write_text(
+            "#!/usr/bin/env bash\n"
+        )
+
+        with patch("restitution.subprocess.run") as mock_run, \
+             patch(
+                 "restitution.check_tmux_available",
+                 return_value=True,
+             ):
+            create_tmux_session(
+                [unit], str(pack), "test-session"
+            )
+
+        cmd = mock_run.call_args_list[0].args[0]
+        shell_arg = cmd[-1]
+        assert '"' in shell_arg
+
+    def test_combined_warns_on_preview_tmux(
+        self, tmp_path, capsys
+    ):
+        """--combined should warn when --preview or --tmux are also
+        passed rather than silently ignoring them."""
+        report = _minimal_report(
+            [_env_finding("/project/.env", ["K"])]
+        )
+        p = tmp_path / "scan.json"
+        p.write_text(json.dumps(report))
+        rc = main([
+            "--input", str(p),
+            "--dry-run",
+            "--combined",
+            "--preview",
+        ])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "--combined ignores" in err
