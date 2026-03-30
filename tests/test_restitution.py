@@ -13,12 +13,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from restitution import (
+    OP_SSH_AGENT_SOCK,
     OpMatch,
     WorkUnit,
     _detect_cloud_provider,
+    _detect_op_ssh_agent,
     _gather_environment_lines,
     _is_incident_response,
     _render_index_entry,
+    _resolve_op_ssh_sock,
     build_parser,
     check_tmux_available,
     compile_claude_launcher,
@@ -692,6 +695,7 @@ class TestSubtaskSections:
         md = compile_subtask_section(1, "kubeconfig_migrate", nfs, {})
         assert "exec-based auth" in md
         assert "chmod 600" in md
+        assert "client-certificate-data" in md
 
     def test_token_migrate_npm(self):
         raw = {
@@ -1488,3 +1492,95 @@ class TestPackPath:
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         md = compile_task_file(unit)
         assert "index.md" in md
+
+
+# ── SSH agent detection ─────────────────────────────────────────────
+
+
+class TestResolveOpSshSock:
+    def test_well_known_path_exists(self):
+        with patch("restitution.os.path.exists", return_value=True):
+            assert _resolve_op_ssh_sock() == OP_SSH_AGENT_SOCK
+
+    def test_well_known_path_missing_falls_through_to_env(self):
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": ""}, clear=False),
+        ):
+            assert _resolve_op_ssh_sock() is None
+
+    def test_ssh_auth_sock_with_1password_path(self, tmp_path):
+        sock_path = str(tmp_path / "1password-agent.sock")
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": sock_path}, clear=False),
+        ):
+            result = _resolve_op_ssh_sock()
+            assert result == sock_path
+
+    def test_ssh_auth_sock_symlink_to_1password(self, tmp_path):
+        target = tmp_path / "2BUA8C4S2C.com.1password" / "agent.sock"
+        target.parent.mkdir()
+        target.touch()
+        link = tmp_path / "agent-link.sock"
+        link.symlink_to(target)
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": str(link)}, clear=False),
+        ):
+            result = _resolve_op_ssh_sock()
+            assert result == str(link)
+
+    def test_ssh_auth_sock_unrelated_socket(self, tmp_path):
+        sock_path = str(tmp_path / "gnome-keyring" / "ssh")
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": sock_path}, clear=False),
+        ):
+            assert _resolve_op_ssh_sock() is None
+
+
+class TestDetectOpSshAgent:
+    def test_returns_false_when_no_socket(self):
+        _detect_op_ssh_agent.cache_clear()
+        with (
+            patch("restitution._resolve_op_ssh_sock", return_value=None),
+        ):
+            assert _detect_op_ssh_agent() is False
+        _detect_op_ssh_agent.cache_clear()
+
+    def test_returns_true_when_socket_live(self):
+        _detect_op_ssh_agent.cache_clear()
+        with (
+            patch(
+                "restitution._resolve_op_ssh_sock",
+                return_value="/tmp/agent.sock",
+            ),
+            patch("restitution._socket_is_live", return_value=True),
+        ):
+            assert _detect_op_ssh_agent() is True
+        _detect_op_ssh_agent.cache_clear()
+
+    def test_returns_false_when_socket_stale(self):
+        _detect_op_ssh_agent.cache_clear()
+        with (
+            patch(
+                "restitution._resolve_op_ssh_sock",
+                return_value="/tmp/agent.sock",
+            ),
+            patch("restitution._socket_is_live", return_value=False),
+        ):
+            assert _detect_op_ssh_agent() is False
+        _detect_op_ssh_agent.cache_clear()
+
+
+# ── Verification wording ────────────────────────────────────────────
+
+
+class TestVerificationWording:
+    def test_task_file_verification_wording(self):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        md = compile_task_file(unit)
+        verify_section = md.split("## Verification")[1]
+        assert "Run a targeted" not in verify_section
+        assert "ignore any unrelated findings" in verify_section

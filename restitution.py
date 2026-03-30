@@ -709,36 +709,47 @@ OP_SSH_AGENT_SOCK = os.path.expanduser(
 
 @functools.lru_cache(maxsize=1)
 def _detect_op_ssh_agent() -> bool:
-    """Check if 1Password SSH agent is configured and live.
+    """Check if the 1Password SSH agent is live.
 
-    Requires both a live socket (not just a stale file) and an
-    IdentityAgent directive in ~/.ssh/config pointing to it.
-    A socket that exists but is not connectable indicates 1Password
-    is installed but not running.
+    Detection is intentionally broad: a live socket at the well-known
+    path is sufficient. We also accept SSH_AUTH_SOCK pointing to the
+    1Password socket (directly or via symlink), which covers setups
+    that configure the agent through shell profile, launchd, or
+    Include-based ssh_config rather than a literal IdentityAgent line.
     """
-    if not os.path.exists(OP_SSH_AGENT_SOCK):
+    sock_path = _resolve_op_ssh_sock()
+    if not sock_path:
         return False
+    return _socket_is_live(sock_path)
 
-    # Verify the socket is live, not stale.
+
+def _resolve_op_ssh_sock() -> Optional[str]:
+    """Return the 1Password agent socket path if one can be found."""
+    if os.path.exists(OP_SSH_AGENT_SOCK):
+        return OP_SSH_AGENT_SOCK
+
+    auth_sock = os.environ.get("SSH_AUTH_SOCK", "")
+    if not auth_sock:
+        return None
+    try:
+        resolved = str(pathlib.Path(auth_sock).resolve())
+    except OSError:
+        return None
+    if "1password" in resolved.lower() or "2BUA8C4S2C" in resolved:
+        return auth_sock
+    return None
+
+
+def _socket_is_live(path: str) -> bool:
+    """Return True if the Unix socket at path accepts a connection."""
     sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     try:
         sock.settimeout(1)
-        sock.connect(OP_SSH_AGENT_SOCK)
+        sock.connect(path)
     except (OSError, _socket.timeout):
         return False
     finally:
         sock.close()
-
-    # Verify ~/.ssh/config routes through the 1Password agent.
-    ssh_config = os.path.expanduser("~/.ssh/config")
-    try:
-        with open(ssh_config, encoding="utf-8") as f:
-            content = f.read()
-        if "2BUA8C4S2C.com.1password" not in content:
-            return False
-    except OSError:
-        return False
-
     return True
 
 
@@ -1597,8 +1608,9 @@ def _section_kubeconfig_migrate(
             "",
             "4. **Verify no embedded credentials remain** "
             "by inspecting the `users:` section of the "
-            "config for `token:`, `client-key-data:`, or "
-            "`password:` fields.",
+            "config for `client-certificate-data:`, "
+            "`client-key-data:`, `token:`, or `password:` "
+            "fields.",
         ]
     )
 
@@ -1784,8 +1796,10 @@ def _compile_verification_tail(
     )
     categories = sorted(set(nf.category for nf in unit.findings))
     lines.append(
-        "Run a targeted clawback scan and check that "
-        "the findings for these paths are resolved:"
+        "Run clawback and confirm the findings for these "
+        "specific paths no longer appear. The scan covers the "
+        "full category, so ignore any unrelated findings from "
+        "other paths:"
     )
     lines.append("")
     lines.append("```bash")
