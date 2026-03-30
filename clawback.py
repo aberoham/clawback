@@ -161,6 +161,7 @@ KNOWN_SECRET_PREFIXES = (
     "AIza",              # Google API key
     "ya29.",             # Google OAuth token
     "AGE-SECRET-KEY-",   # age encryption key
+    "lsv2_pt_",          # LangSmith / LangChain API key
 )
 
 # Regex patterns for values that are clearly not secrets.
@@ -400,6 +401,45 @@ def classify_value(value: str) -> Tuple[bool, str]:
             return True, f"likely_base64:{ent:.1f}"
 
     return False, "benign"
+
+
+def _name_value_suspicious(raw_value: str) -> Tuple[bool, str]:
+    """Relaxed value check for when the variable name indicates a secret.
+
+    Called only when classify_value returned "benign" and the variable
+    name matched GENERIC_SECRET_RE or NAMED_SECRET_VARS. Applies lower
+    thresholds, since the name provides additional confidence that this
+    is credential material rather than ordinary configuration.
+    """
+    stripped = _strip_quotes(raw_value)
+
+    if len(stripped) < 20:
+        return False, "short_value"
+
+    ent = shannon_entropy(stripped)
+    if ent < 3.5:
+        return False, "low_entropy"
+
+    if re.match(r"\w+://", stripped) and not re.match(
+        r"\w+://[^:]+:[^@]+@", stripped
+    ):
+        return False, "url_without_credentials"
+
+    segments = re.split(r"[-_./: ]+", stripped)
+    alpha_words = [
+        s for s in segments if s.isalpha() and len(s) >= 3
+    ]
+    word_chars = sum(len(w) for w in alpha_words)
+    if word_chars / len(stripped) > 0.6:
+        return False, "word_like_value"
+
+    # Catch unseparated placeholder values like "sampletokenvalue12345"
+    # where the alpha prefix dominates the string.
+    alpha_run = re.match(r"[a-zA-Z]+", stripped)
+    if alpha_run and alpha_run.end() / len(stripped) > 0.6:
+        return False, "word_like_value"
+
+    return True, f"name_plus_value:{ent:.1f}"
 
 
 def _is_secret_locator(var_name: str, raw_value: str) -> bool:
@@ -1184,15 +1224,38 @@ def scan_shell_profiles(ctx: ScanContext, quiet: bool) -> None:
                     line=line_num,
                     reason=reason,
                 )
-            elif ctx.audit_mode:
-                ctx.observe(
-                    cat, profile,
-                    f"Suspicious variable '{var_name}' in "
-                    f"{profile.name}:{line_num} with benign value",
-                    reason="suspicious_name_benign_value",
-                    variable=var_name,
-                    line=line_num,
-                )
+            else:
+                nv_hit = False
+                nv_reason = val_reason
+                if val_reason == "benign":
+                    nv_hit, nv_reason = _name_value_suspicious(
+                        raw_value
+                    )
+                if nv_hit:
+                    nv_severity = (
+                        Severity.HIGH
+                        if var_name in NAMED_SECRET_VARS
+                        else Severity.MEDIUM
+                    )
+                    ctx.add(
+                        cat, profile, nv_severity,
+                        f"Secret variable '{var_name}' in "
+                        f"{profile.name}:{line_num}",
+                        "Move to macOS Keychain or 1Password CLI. "
+                        "Use 'op run' to inject secrets at runtime.",
+                        variable=var_name,
+                        line=line_num,
+                        reason=nv_reason,
+                    )
+                elif ctx.audit_mode:
+                    ctx.observe(
+                        cat, profile,
+                        f"Suspicious variable '{var_name}' in "
+                        f"{profile.name}:{line_num} with benign value",
+                        reason="suspicious_name_benign_value",
+                        variable=var_name,
+                        line=line_num,
+                    )
 
 
 # -------------------------------------------------------------------
@@ -1237,14 +1300,34 @@ def scan_environment_variables(ctx: ScanContext, quiet: bool) -> None:
                 variable=var_name,
                 reason=val_reason,
             )
-        elif ctx.audit_mode:
-            ctx.observe(
-                cat, f"env:{var_name}",
-                f"Suspicious environment variable '{var_name}' "
-                f"with benign value",
-                reason="suspicious_name_benign_value",
-                variable=var_name,
-            )
+        else:
+            nv_hit = False
+            nv_reason = val_reason
+            if val_reason == "benign":
+                nv_hit, nv_reason = _name_value_suspicious(
+                    var_value
+                )
+            if nv_hit:
+                nv_severity = (
+                    Severity.HIGH
+                    if var_name in NAMED_SECRET_VARS
+                    else Severity.MEDIUM
+                )
+                ctx.add(
+                    cat, f"env:{var_name}", nv_severity,
+                    f"Secret in environment variable: {var_name}",
+                    "Unset this variable and use a secrets manager.",
+                    variable=var_name,
+                    reason=nv_reason,
+                )
+            elif ctx.audit_mode:
+                ctx.observe(
+                    cat, f"env:{var_name}",
+                    f"Suspicious environment variable '{var_name}' "
+                    f"with benign value",
+                    reason="suspicious_name_benign_value",
+                    variable=var_name,
+                )
 
 
 # -------------------------------------------------------------------
@@ -1332,7 +1415,20 @@ def _report_env_file(
                 "reason": val_reason if val_hit else "secret_locator",
             })
         elif name_hit:
-            observed_vars.append(var_name)
+            if val_reason == "benign":
+                nv_hit, nv_reason = _name_value_suspicious(
+                    raw_value
+                )
+                if nv_hit:
+                    secret_vars.append({
+                        "variable": var_name,
+                        "line": line_num,
+                        "reason": nv_reason,
+                    })
+                else:
+                    observed_vars.append(var_name)
+            else:
+                observed_vars.append(var_name)
 
     if observed_vars and ctx.audit_mode:
         ctx.observe(

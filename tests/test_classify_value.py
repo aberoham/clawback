@@ -1,9 +1,20 @@
 """Tests for classify_value — the core heuristic engine."""
 from __future__ import annotations
 
+import secrets
+
 import pytest
 
-from clawback import classify_value, shannon_entropy, _strip_quotes
+from clawback import (
+    classify_value,
+    shannon_entropy,
+    _name_value_suspicious,
+    _strip_quotes,
+)
+
+
+def _fake_langsmith_key() -> str:
+    return f"lsv2_pt_{secrets.token_hex(16)}_{secrets.token_hex(5)}"
 
 
 # -------------------------------------------------------------------
@@ -90,6 +101,10 @@ class TestStripQuotes:
             "AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
             "QQQQQQQQQQQQQQQQQQQ",
             "known_prefix:AGE-SECRET-KEY-",
+        ),
+        (
+            _fake_langsmith_key(),
+            "known_prefix:lsv2_pt_",
         ),
         (
             "postgres://admin:s3cretP@ss@db.example.com:5432/mydb",
@@ -229,3 +244,60 @@ class TestClassifyEdgeCases:
         is_secret, reason = classify_value("$HOME/.nvm")
         assert is_secret is False
         assert reason == "shell_variable_expansion"
+
+
+# -------------------------------------------------------------------
+# _name_value_suspicious — name-assisted heuristic
+# -------------------------------------------------------------------
+
+
+class TestNameValueSuspicious:
+    def test_langsmith_key_suspicious(self):
+        hit, reason = _name_value_suspicious(_fake_langsmith_key())
+        assert hit is True
+        assert reason.startswith("name_plus_value:")
+
+    def test_short_value_not_suspicious(self):
+        hit, reason = _name_value_suspicious("short_val")
+        assert hit is False
+        assert reason == "short_value"
+
+    def test_low_entropy_not_suspicious(self):
+        hit, reason = _name_value_suspicious("aaaaaaaaaaaaaaaaaaaaaa")
+        assert hit is False
+        assert reason == "low_entropy"
+
+    def test_url_without_creds_not_suspicious(self):
+        hit, reason = _name_value_suspicious(
+            "https://api.example.com/v1/tokens"
+        )
+        assert hit is False
+        assert reason == "url_without_credentials"
+
+    def test_url_with_creds_suspicious(self):
+        hit, reason = _name_value_suspicious(
+            "postgres://admin:s3cretP@ss@db.example.com:5432/mydb"
+        )
+        assert hit is True
+        assert reason.startswith("name_plus_value:")
+
+    def test_word_like_value_not_suspicious(self):
+        hit, reason = _name_value_suspicious(
+            "some_config_value_here_for_testing"
+        )
+        assert hit is False
+        assert reason == "word_like_value"
+
+    def test_unseparated_placeholder_not_suspicious(self):
+        """Alpha-dominant strings without separators like
+        'sampletokenvalue12345' are obvious placeholders."""
+        hit, reason = _name_value_suspicious("sampletokenvalue12345")
+        assert hit is False
+        assert reason == "word_like_value"
+
+    def test_unseparated_mixed_case_placeholder(self):
+        hit, reason = _name_value_suspicious(
+            "SampleTokenValueHere12345"
+        )
+        assert hit is False
+        assert reason == "word_like_value"

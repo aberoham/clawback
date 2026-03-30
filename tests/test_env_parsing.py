@@ -1,6 +1,8 @@
 """Tests for .env and shell profile line parsing."""
 from __future__ import annotations
 
+import secrets
+
 import pytest
 
 from clawback import (
@@ -9,6 +11,10 @@ from clawback import (
     scan_env_files,
     scan_shell_profiles,
 )
+
+
+def _fake_langsmith_key() -> str:
+    return f"lsv2_pt_{secrets.token_hex(16)}_{secrets.token_hex(5)}"
 
 
 # -------------------------------------------------------------------
@@ -232,3 +238,75 @@ class TestScanEnvFiles:
         )
         scan_env_files(scan_ctx, quiet=True)
         assert len(scan_ctx.findings) == 1
+
+    def test_env_langsmith_key_detected(self, scan_ctx, clean_env):
+        """LangSmith/LangChain API keys are detected via prefix."""
+        proj = self._make_project(scan_ctx)
+        fake_key = _fake_langsmith_key()
+        (proj / ".env").write_text(
+            f"LANGCHAIN_API_KEY={fake_key}\n"
+            f"LANGSMITH_API_KEY={fake_key}\n"
+        )
+        scan_env_files(scan_ctx, quiet=True)
+        assert len(scan_ctx.findings) == 1
+        found_vars = set(
+            scan_ctx.findings[0].details.get("variables", [])
+        )
+        assert "LANGCHAIN_API_KEY" in found_vars
+        assert "LANGSMITH_API_KEY" in found_vars
+
+    def test_env_secret_name_config_value_no_finding(
+        self, scan_ctx, clean_env
+    ):
+        """Word-like config values should not trigger findings even
+        when the variable name matches GENERIC_SECRET_RE."""
+        proj = self._make_project(scan_ctx)
+        (proj / ".env").write_text(
+            "MY_SECRET=some_config_value_here\n"
+            "DATABASE_PASSWORD=my-database-name\n"
+        )
+        scan_env_files(scan_ctx, quiet=True)
+        assert len(scan_ctx.findings) == 0
+
+
+    def test_env_placeholder_value_no_finding(self, scan_ctx, clean_env):
+        """Unseparated alpha-dominant placeholders should not trigger
+        findings even with a secret-shaped variable name."""
+        proj = self._make_project(scan_ctx)
+        (proj / ".env").write_text(
+            "OPENAI_API_KEY=sampletokenvalue12345\n"
+        )
+        scan_env_files(scan_ctx, quiet=True)
+        assert len(scan_ctx.findings) == 0
+
+
+class TestShellProfileLangSmith:
+    def test_langsmith_key_in_profile_detected(
+        self, scan_ctx, clean_env
+    ):
+        """LangSmith key exported in a shell profile produces a finding."""
+        fake_key = _fake_langsmith_key()
+        zshrc = scan_ctx.home / ".zshrc"
+        zshrc.write_text(
+            f"export LANGCHAIN_API_KEY={fake_key}\n"
+        )
+        scan_shell_profiles(scan_ctx, quiet=True)
+        assert len(scan_ctx.findings) == 1
+        assert scan_ctx.findings[0].details["variable"] == (
+            "LANGCHAIN_API_KEY"
+        )
+
+    def test_named_var_nv_hit_gets_high_severity(
+        self, scan_ctx, clean_env
+    ):
+        """Tier-1 variable names should get HIGH severity even when
+        the value is detected via the name_plus_value fallback path."""
+        zshrc = scan_ctx.home / ".zshrc"
+        zshrc.write_text(
+            "export OPENAI_API_KEY=0123456789abcdef0123\n"
+        )
+        scan_shell_profiles(scan_ctx, quiet=True)
+        assert len(scan_ctx.findings) == 1
+        f = scan_ctx.findings[0]
+        assert f.severity == "high"
+        assert f.details["reason"].startswith("name_plus_value:")
