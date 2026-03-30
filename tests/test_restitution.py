@@ -1,4 +1,5 @@
 """Tests for clawback-restitution remediation pack generator."""
+
 from __future__ import annotations
 
 import json
@@ -12,10 +13,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from restitution import (
-    NormalizedFinding,
+    OP_SSH_AGENT_SOCK,
     OpMatch,
     WorkUnit,
+    _detect_cloud_provider,
+    _detect_op_ssh_agent,
+    _gather_environment_lines,
     _is_incident_response,
+    _render_index_entry,
+    _resolve_op_ssh_sock,
     build_parser,
     check_tmux_available,
     compile_claude_launcher,
@@ -76,8 +82,7 @@ def _env_finding(path="/project/.env", variables=None):
         "path": path,
         "severity": "high",
         "description": (
-            f".env file with {len(variables)} secret(s): "
-            + ", ".join(variables)
+            f".env file with {len(variables)} secret(s): " + ", ".join(variables)
         ),
         "remediation": "Add .env to .gitignore.",
         "details": {"variables": variables},
@@ -95,9 +100,7 @@ def _shell_profile_finding(
         "category": "shell_profile_secrets",
         "path": path,
         "severity": "high",
-        "description": (
-            f"Secret variable '{variable}' in .zshrc:{line}"
-        ),
+        "description": (f"Secret variable '{variable}' in .zshrc:{line}"),
         "remediation": "Use op run to inject secrets at runtime.",
         "details": {
             "variable": variable,
@@ -107,17 +110,13 @@ def _shell_profile_finding(
     }
 
 
-def _env_var_finding(
-    variable="GH_TOKEN", reason="known_prefix:ghp_"
-):
+def _env_var_finding(variable="GH_TOKEN", reason="known_prefix:ghp_"):
     """Build a representative environment_variables finding."""
     return {
         "category": "environment_variables",
         "path": f"env:{variable}",
         "severity": "high",
-        "description": (
-            f"Secret in environment variable: {variable}"
-        ),
+        "description": (f"Secret in environment variable: {variable}"),
         "remediation": "Unset and use a secrets manager.",
         "details": {"variable": variable, "reason": reason},
     }
@@ -138,9 +137,7 @@ def _ssh_finding(
             f"Unencrypted {key_type} SSH key with "
             f"overly permissive permissions ({permissions})"
         ),
-        "remediation": (
-            "Add a passphrase: ssh-keygen -p -f <path>."
-        ),
+        "remediation": ("Add a passphrase: ssh-keygen -p -f <path>."),
         "details": {
             "key_type": key_type,
             "encrypted": encrypted,
@@ -162,8 +159,7 @@ def _teampcp_finding():
 
 
 def _cloud_finding(
-    path="/Users/test/.config/gcloud/"
-    "application_default_credentials.json",
+    path="/Users/test/.config/gcloud/application_default_credentials.json",
 ):
     """Build a representative cloud_credentials finding."""
     return {
@@ -198,9 +194,7 @@ def _make_work_unit(
             for v in nf.variables:
                 unit.enrichment[v] = OpMatch(status="missing")
         elif nf.variable:
-            unit.enrichment[nf.variable] = OpMatch(
-                status="missing"
-            )
+            unit.enrichment[nf.variable] = OpMatch(status="missing")
     return unit
 
 
@@ -305,9 +299,7 @@ class TestNormalize:
             _ssh_finding(),
             _env_var_finding(),
         ]
-        results = normalize_all(
-            raw_findings, category_filter="ssh_keys"
-        )
+        results = normalize_all(raw_findings, category_filter="ssh_keys")
         assert len(results) == 1
         assert results[0].category == "ssh_keys"
 
@@ -387,9 +379,7 @@ class TestWorkAreaDetection:
 
     def test_gcloud_logical_area(self):
         home = str(Path.home())
-        gcloud_path = os.path.join(
-            home, ".config", "gcloud", "credentials.json"
-        )
+        gcloud_path = os.path.join(home, ".config", "gcloud", "credentials.json")
         gcloud_dir = os.path.join(home, ".config", "gcloud")
         if os.path.isdir(gcloud_dir):
             root, wtype, slug = detect_work_area(gcloud_path)
@@ -419,12 +409,8 @@ class TestGrouping:
 
         findings = normalize_all(
             [
-                _env_finding(
-                    str(repo / ".env"), ["KEY_A"]
-                ),
-                _env_finding(
-                    str(repo / "config.env"), ["KEY_B"]
-                ),
+                _env_finding(str(repo / ".env"), ["KEY_A"]),
+                _env_finding(str(repo / "config.env"), ["KEY_B"]),
             ]
         )
         units = group_into_work_units(findings)
@@ -441,12 +427,8 @@ class TestGrouping:
 
         findings = normalize_all(
             [
-                _env_finding(
-                    str(tmp_path / "repo-a" / ".env"), ["A"]
-                ),
-                _env_finding(
-                    str(tmp_path / "repo-b" / ".env"), ["B"]
-                ),
+                _env_finding(str(tmp_path / "repo-a" / ".env"), ["A"]),
+                _env_finding(str(tmp_path / "repo-b" / ".env"), ["B"]),
             ]
         )
         units = group_into_work_units(findings)
@@ -463,12 +445,8 @@ class TestGrouping:
         (repo_lo / ".git").mkdir()
         (repo_lo / ".env").touch()
 
-        hi_finding = _env_finding(
-            str(repo_hi / ".env"), ["X"]
-        )
-        lo_finding = _env_finding(
-            str(repo_lo / ".env"), ["Y"]
-        )
+        hi_finding = _env_finding(str(repo_hi / ".env"), ["X"])
+        lo_finding = _env_finding(str(repo_lo / ".env"), ["Y"])
         lo_finding["severity"] = "low"
 
         findings = normalize_all([lo_finding, hi_finding])
@@ -485,9 +463,7 @@ class TestGrouping:
 
         findings = normalize_all(
             [
-                _env_finding(
-                    str(tmp_path / name / ".env"), ["K"]
-                )
+                _env_finding(str(tmp_path / name / ".env"), ["K"])
                 for name in ("a", "b", "c")
             ]
         )
@@ -537,17 +513,9 @@ class TestGrouping:
 
 class TestSubtaskSections:
     def test_env_rewrite_section(self):
-        nfs = [
-            normalize_finding(
-                _env_finding("/project/.env", ["SECRET_KEY"])
-            )
-        ]
-        enrichment = {
-            "SECRET_KEY": OpMatch(status="missing")
-        }
-        md = compile_subtask_section(
-            1, "env_rewrite", nfs, enrichment
-        )
+        nfs = [normalize_finding(_env_finding("/project/.env", ["SECRET_KEY"]))]
+        enrichment = {"SECRET_KEY": OpMatch(status="missing")}
+        md = compile_subtask_section(1, "env_rewrite", nfs, enrichment)
         assert "### 1." in md
         assert "SECRET_KEY" in md
         assert "**1Password status**" in md
@@ -555,104 +523,90 @@ class TestSubtaskSections:
         assert "op run --env-file" in md
 
     def test_env_rewrite_with_exact_match(self):
-        nfs = [
-            normalize_finding(
-                _env_finding("/project/.env", ["API_KEY"])
-            )
-        ]
+        nfs = [normalize_finding(_env_finding("/project/.env", ["API_KEY"]))]
         enrichment = {
             "API_KEY": OpMatch(
                 status="exact",
                 vault="Development",
                 item_title="My API Key",
                 field_name="credential",
-                reference=(
-                    "op://Development/My API Key/credential"
-                ),
+                reference=("op://Development/My API Key/credential"),
             )
         }
-        md = compile_subtask_section(
-            1, "env_rewrite", nfs, enrichment
-        )
+        md = compile_subtask_section(1, "env_rewrite", nfs, enrichment)
         assert "**FOUND**" in md
         assert "op://Development/My API Key/credential" in md
 
     def test_profile_rewrite_section(self):
-        nfs = [
-            normalize_finding(_shell_profile_finding())
-        ]
-        enrichment = {
-            "AWS_SECRET_ACCESS_KEY": OpMatch(status="missing")
-        }
-        md = compile_subtask_section(
-            1, "profile_rewrite", nfs, enrichment
-        )
+        nfs = [normalize_finding(_shell_profile_finding())]
+        enrichment = {"AWS_SECRET_ACCESS_KEY": OpMatch(status="missing")}
+        md = compile_subtask_section(1, "profile_rewrite", nfs, enrichment)
         assert "### 1." in md
         assert "Remove secrets from" in md
         assert "AWS_SECRET_ACCESS_KEY" in md
         assert "**What to do**" in md
 
     def test_env_var_trace_section(self):
-        nfs = [
-            normalize_finding(_env_var_finding("GH_TOKEN"))
-        ]
-        enrichment = {
-            "GH_TOKEN": OpMatch(status="missing")
-        }
-        md = compile_subtask_section(
-            1, "env_var_trace", nfs, enrichment
-        )
+        nfs = [normalize_finding(_env_var_finding("GH_TOKEN"))]
+        enrichment = {"GH_TOKEN": OpMatch(status="missing")}
+        md = compile_subtask_section(1, "env_var_trace", nfs, enrichment)
         assert "### 1." in md
         assert "GH_TOKEN" in md
         assert "**What to investigate**" in md
 
-    def test_ssh_harden_section(self):
+    def test_ssh_harden_section_no_op_agent(self):
         nfs = [normalize_finding(_ssh_finding())]
         enrichment = {}
-        md = compile_subtask_section(
-            1, "ssh_harden", nfs, enrichment
-        )
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=False,
+        ):
+            md = compile_subtask_section(1, "ssh_harden", nfs, enrichment)
         assert "### 1." in md
         assert "chmod 600" in md
         assert "ssh-keygen -p" in md
         assert "ssh-add --apple-use-keychain" in md
 
+    def test_ssh_harden_with_op_agent_leads_tier1(self):
+        nfs = [normalize_finding(_ssh_finding())]
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=True,
+        ):
+            md = compile_subtask_section(1, "ssh_harden", nfs, {})
+        assert "1Password SSH agent" in md
+        assert "agent is already active" in md
+        assert "desktop app" in md
+        assert "ssh-keygen -p" not in md
+
     def test_ssh_encrypted_skips_passphrase(self):
-        nfs = [
-            normalize_finding(
-                _ssh_finding(encrypted=True, permissions="0o644")
-            )
-        ]
-        md = compile_subtask_section(
-            1, "ssh_harden", nfs, {}
-        )
+        nfs = [normalize_finding(_ssh_finding(encrypted=True, permissions="0o644"))]
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=False,
+        ):
+            md = compile_subtask_section(1, "ssh_harden", nfs, {})
         assert "chmod 600" in md
         assert "ssh-keygen -p" not in md
 
     def test_ssh_good_permissions_skips_chmod(self):
-        nfs = [
-            normalize_finding(
-                _ssh_finding(
-                    encrypted=False, permissions="0o600"
-                )
-            )
-        ]
-        md = compile_subtask_section(
-            1, "ssh_harden", nfs, {}
-        )
+        nfs = [normalize_finding(_ssh_finding(encrypted=False, permissions="0o600"))]
+        with patch(
+            "restitution._detect_op_ssh_agent",
+            return_value=False,
+        ):
+            md = compile_subtask_section(1, "ssh_harden", nfs, {})
         assert "chmod 600" not in md
         assert "ssh-keygen -p" in md
 
     def test_incident_response_section(self):
         nfs = [normalize_finding(_teampcp_finding())]
-        md = compile_subtask_section(
-            1, "incident_response", nfs, {}
-        )
+        md = compile_subtask_section(1, "incident_response", nfs, {})
         assert "CRITICAL" in md
         assert "Isolate" in md
         assert "Do not attempt automated remediation" in md
 
-    def test_generic_section(self):
+    def test_wallet_secure_section(self):
         raw = {
             "category": "crypto_wallets",
             "path": "/wallets/bitcoin",
@@ -662,11 +616,100 @@ class TestSubtaskSections:
             "details": {},
         }
         nfs = [normalize_finding(raw)]
-        md = compile_subtask_section(
-            1, "wallet_secure", nfs, {}
-        )
-        assert "crypto_wallets" in md
-        assert "Encrypt the wallet." in md
+        md = compile_subtask_section(1, "wallet_secure", nfs, {})
+        assert "Secure wallet" in md
+        assert "FileVault" in md
+        assert "chmod 600" in md
+        # Backup must precede fund transfer.
+        assert md.index("Back up") < md.index("Move funds")
+
+    def test_generic_section_fallback(self):
+        raw = {
+            "category": "unknown_category",
+            "path": "/some/path",
+            "severity": "medium",
+            "description": "Unknown finding",
+            "remediation": "Investigate manually.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "generic", nfs, {})
+        assert "unknown_category" in md
+        assert "Investigate manually." in md
+        assert "remediation guide" in md
+
+    def test_git_credential_store_section(self):
+        raw = {
+            "category": "git_credentials",
+            "path": "/Users/test/.git-credentials",
+            "severity": "high",
+            "description": "Plaintext git credentials",
+            "remediation": "Switch to credential helper.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "git_credential_store", nfs, {})
+        assert "osxkeychain" in md
+        assert "rm " in md
+        assert "gh auth login" in md
+        assert "Repeat for each host" in md
+
+    def test_cloud_migrate_aws(self):
+        raw = {
+            "category": "cloud_credentials",
+            "path": "/Users/test/.aws/credentials",
+            "severity": "high",
+            "description": "AWS credentials file",
+            "remediation": "Use AWS SSO.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "cloud_migrate", nfs, {})
+        assert "aws" in md.lower()
+        assert "SSO" in md
+
+    def test_cloud_migrate_gcp(self):
+        raw = {
+            "category": "cloud_credentials",
+            "path": "/Users/test/.config/gcloud/adc.json",
+            "severity": "high",
+            "description": "GCP ADC",
+            "remediation": "Revoke ADC.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "cloud_migrate", nfs, {})
+        assert "gcloud" in md
+        assert "revoke" in md.lower()
+
+    def test_kubeconfig_migrate_section(self):
+        raw = {
+            "category": "kubernetes",
+            "path": "/Users/test/.kube/config",
+            "severity": "medium",
+            "description": "Kubeconfig with embedded creds",
+            "remediation": "Use exec-based auth.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "kubeconfig_migrate", nfs, {})
+        assert "exec-based auth" in md
+        assert "chmod 600" in md
+        assert "client-certificate-data" in md
+
+    def test_token_migrate_npm(self):
+        raw = {
+            "category": "package_manager_tokens",
+            "path": "/Users/test/.npmrc",
+            "severity": "high",
+            "description": "npm token in .npmrc",
+            "remediation": "Use npm login.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "token_migrate", nfs, {})
+        assert "npmrc" in md.lower() or "npm" in md.lower()
+        assert "npm login" in md
 
 
 # ── Task file compilation ────────────────────────────────────────────
@@ -674,9 +717,7 @@ class TestSubtaskSections:
 
 class TestTaskFile:
     def test_task_file_has_required_sections(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["SECRET_KEY"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["SECRET_KEY"])])
         md = compile_task_file(unit)
         assert "# Task 001-high-test" in md
         assert "## Working directory" in md
@@ -718,23 +759,19 @@ class TestTaskFile:
         assert _is_incident_response(unit)
 
     def test_normal_unit_not_incident_response(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         assert not _is_incident_response(unit)
 
-    def test_verification_uses_json_not_scan_path(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+    def test_verification_uses_correct_command(self):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         md = compile_task_file(unit)
-        assert "clawback.py --json" in md
+        assert "uv run python clawback.py" in md
+        assert "--pretty" in md
+        assert "--json" not in md
         assert "--scan-path" not in md
 
     def test_verification_lists_affected_paths(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         md = compile_task_file(unit)
         assert "`/project/.env`" in md
 
@@ -755,12 +792,8 @@ class TestTaskFile:
 
 class TestPackCompilation:
     def test_index_contains_queue(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
-        report = _minimal_report(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        report = _minimal_report([_env_finding("/project/.env", ["K"])])
         md = compile_index([unit], report, "/tmp/pack")
         assert "# Remediation Pack" in md
         assert "## Scan Summary" in md
@@ -770,16 +803,13 @@ class TestPackCompilation:
         assert "tasks/" in md
         assert "launch/" in md
 
-    def test_index_no_scan_path_flag(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
-        report = _minimal_report(
-            [_env_finding("/project/.env", ["K"])]
-        )
+    def test_index_uses_correct_verify_command(self):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        report = _minimal_report([_env_finding("/project/.env", ["K"])])
         md = compile_index([unit], report, "/tmp/pack")
         assert "--scan-path" not in md
-        assert "clawback.py --json" in md
+        assert "--json" not in md
+        assert "--category env_files --pretty" in md
 
     def test_index_ir_unit_has_no_launcher(self):
         unit = _make_work_unit(
@@ -793,12 +823,8 @@ class TestPackCompilation:
         assert "launch/001-critical-ioc-claude.sh" not in md
 
     def test_index_severity_counts(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
-        report = _minimal_report(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        report = _minimal_report([_env_finding("/project/.env", ["K"])])
         md = compile_index([unit], report, "/tmp/pack")
         assert "1 high" in md
 
@@ -818,9 +844,7 @@ class TestPackCompilation:
         assert "Input" not in md
 
     def test_claude_launcher_content(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         sh = compile_claude_launcher(unit, "/tmp/pack")
         assert "#!/usr/bin/env bash" in sh
         assert 'cd "/project"' in sh
@@ -830,9 +854,7 @@ class TestPackCompilation:
         assert "cat" in sh
 
     def test_codex_launcher_content(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         sh = compile_codex_launcher(unit, "/tmp/pack")
         assert "codex -p" in sh
 
@@ -842,16 +864,10 @@ class TestPackCompilation:
 
 class TestPackGeneration:
     def test_pack_creates_directory_layout(self, tmp_path):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
-        report = _minimal_report(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        report = _minimal_report([_env_finding("/project/.env", ["K"])])
         out = tmp_path / "pack"
-        pack_path = generate_pack(
-            [unit], report, str(out), "/scan.json"
-        )
+        generate_pack([unit], report, str(out), "/scan.json")
 
         assert (out / "index.md").exists()
         assert (out / "metadata.md").exists()
@@ -859,12 +875,8 @@ class TestPackGeneration:
         assert (out / "launch").is_dir()
 
     def test_pack_creates_task_files(self, tmp_path):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
-        report = _minimal_report(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        report = _minimal_report([_env_finding("/project/.env", ["K"])])
         out = tmp_path / "pack"
         generate_pack([unit], report, str(out), None)
 
@@ -876,18 +888,14 @@ class TestPackGeneration:
         assert "# Task 001-high-test" in content
 
     def test_pack_creates_launcher_scripts(self, tmp_path):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
-        report = _minimal_report(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        report = _minimal_report([_env_finding("/project/.env", ["K"])])
         out = tmp_path / "pack"
         generate_pack([unit], report, str(out), None)
 
         launchers = sorted((out / "launch").iterdir())
         assert len(launchers) == 2
-        names = [l.name for l in launchers]
+        names = [f.name for f in launchers]
         assert "001-high-test-claude.sh" in names
         assert "001-high-test-codex.sh" in names
 
@@ -913,9 +921,7 @@ class TestPackGeneration:
             [_env_finding("/project-a/.env", ["A"]), _ssh_finding()]
         )
         out = tmp_path / "pack"
-        generate_pack(
-            [unit_a, unit_b], report, str(out), None
-        )
+        generate_pack([unit_a, unit_b], report, str(out), None)
 
         tasks = sorted((out / "tasks").iterdir())
         assert len(tasks) == 2
@@ -926,9 +932,7 @@ class TestPackGeneration:
         assert "001-high-a" in index
         assert "002-high-b" in index
 
-    def test_ir_unit_gets_task_but_no_launchers(
-        self, tmp_path
-    ):
+    def test_ir_unit_gets_task_but_no_launchers(self, tmp_path):
         ir_unit = _make_work_unit(
             [_teampcp_finding()],
             unit_id="001-critical-ioc",
@@ -953,18 +957,14 @@ class TestPackGeneration:
             unit_id="002-high-project",
             label="project",
         )
-        report = _minimal_report(
-            [_teampcp_finding(), _env_finding()]
-        )
+        report = _minimal_report([_teampcp_finding(), _env_finding()])
         out = tmp_path / "pack"
-        generate_pack(
-            [ir_unit, normal_unit], report, str(out), None
-        )
+        generate_pack([ir_unit, normal_unit], report, str(out), None)
 
         tasks = sorted((out / "tasks").iterdir())
         assert len(tasks) == 2
         launchers = list((out / "launch").iterdir())
-        launcher_names = [l.name for l in launchers]
+        launcher_names = [f.name for f in launchers]
         assert "001-critical-ioc-claude.sh" not in launcher_names
         assert "002-high-project-claude.sh" in launcher_names
         assert "002-high-project-codex.sh" in launcher_names
@@ -982,51 +982,49 @@ class TestPackGeneration:
 
 class TestEnrichment:
     def test_dry_run_skips_subprocess(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         # Clear enrichment so we can verify it gets populated.
         unit.enrichment.clear()
-        with patch(
-            "restitution.subprocess.run"
-        ) as mock_run:
-            enrich_work_units(
-                [unit], vault=None, dry_run=True
-            )
+        with patch("restitution.subprocess.run") as mock_run:
+            enrich_work_units([unit], vault=None, dry_run=True)
             mock_run.assert_not_called()
         assert "K" in unit.enrichment
-        assert unit.enrichment["K"].status == "missing"
+        assert unit.enrichment["K"].status == "unchecked"
 
     def test_op_unavailable_uses_placeholders(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         unit.enrichment.clear()
         with patch(
             "restitution.shutil.which",
             return_value=None,
         ):
-            enrich_work_units(
-                [unit], vault=None, dry_run=False
-            )
-        assert unit.enrichment["K"].status == "missing"
+            enrich_work_units([unit], vault=None, dry_run=False)
+        assert unit.enrichment["K"].status == "unchecked"
 
     def test_op_unauthenticated_uses_placeholders(self):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         unit.enrichment.clear()
-        with patch(
-            "restitution.check_op_available",
-            return_value=True,
-        ), patch(
-            "restitution.check_op_authenticated",
-            return_value=False,
+        with (
+            patch(
+                "restitution.check_op_available",
+                return_value=True,
+            ),
+            patch(
+                "restitution.check_op_authenticated",
+                return_value=False,
+            ),
         ):
-            enrich_work_units(
-                [unit], vault=None, dry_run=False
-            )
-        assert unit.enrichment["K"].status == "missing"
+            enrich_work_units([unit], vault=None, dry_run=False)
+        assert unit.enrichment["K"].status == "unchecked"
+
+    def test_unchecked_enrichment_renders_not_checked(self):
+        nfs = [normalize_finding(_env_finding("/project/.env", ["SECRET_KEY"]))]
+        enrichment = {"SECRET_KEY": OpMatch(status="unchecked")}
+        section = compile_subtask_section(1, "env_rewrite", nfs, enrichment)
+        assert "**NOT CHECKED**" in section
+        assert "**NOT FOUND**" not in section
+        assert "NOT CHECKED" in section
+        assert "Check 1Password for existing items" in section
 
 
 # ── Stdout summary ───────────────────────────────────────────────────
@@ -1036,13 +1034,14 @@ class TestSummary:
     def test_summary_is_concise(self, capsys):
         from restitution import print_pack_summary
 
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         findings = [normalize_finding(_env_finding())]
         print_pack_summary(
-            "/tmp/pack", [unit], findings,
-            op_available=False, op_authenticated=False,
+            "/tmp/pack",
+            [unit],
+            findings,
+            op_available=False,
+            op_authenticated=False,
         )
         err = capsys.readouterr().err
         assert "clawback-restitution" in err
@@ -1056,9 +1055,7 @@ class TestSummary:
 
 class TestCombinedMode:
     def test_combined_output(self, capsys):
-        unit = _make_work_unit(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         write_combined([unit])
         out = capsys.readouterr().out
         assert "# Clawback Remediation Prompts" in out
@@ -1082,18 +1079,18 @@ class TestCLI:
         (repo / ".git").mkdir()
         (repo / ".env").write_text("SECRET=value")
 
-        report = _minimal_report(
-            [_env_finding(str(repo / ".env"), ["SECRET"])]
-        )
+        report = _minimal_report([_env_finding(str(repo / ".env"), ["SECRET"])])
         scan = tmp_path / "scan.json"
         scan.write_text(json.dumps(report))
 
         out_dir = tmp_path / "pack"
         rc = main(
             [
-                "--input", str(scan),
+                "--input",
+                str(scan),
                 "--dry-run",
-                "--output-dir", str(out_dir),
+                "--output-dir",
+                str(out_dir),
             ]
         )
         assert rc == 0
@@ -1113,7 +1110,8 @@ class TestCLI:
         p.write_text(json.dumps(report))
         rc = main(
             [
-                "--input", str(p),
+                "--input",
+                str(p),
                 "--dry-run",
                 "--combined",
             ]
@@ -1123,18 +1121,19 @@ class TestCLI:
         assert "# Clawback Remediation Prompts" in out
 
     def test_category_filter_via_main(self, tmp_path, capsys):
-        report = _minimal_report(
-            [_env_finding(), _ssh_finding()]
-        )
+        report = _minimal_report([_env_finding(), _ssh_finding()])
         p = tmp_path / "scan.json"
         p.write_text(json.dumps(report))
         out_dir = tmp_path / "pack"
         rc = main(
             [
-                "--input", str(p),
+                "--input",
+                str(p),
                 "--dry-run",
-                "--category", "ssh_keys",
-                "--output-dir", str(out_dir),
+                "--category",
+                "ssh_keys",
+                "--output-dir",
+                str(out_dir),
             ]
         )
         assert rc == 0
@@ -1171,9 +1170,7 @@ class TestPreview:
             unit_id="001-critical-ioc",
             label="ioc",
         )
-        unit.findings[0] = normalize_finding(
-            _teampcp_finding()
-        )
+        unit.findings[0] = normalize_finding(_teampcp_finding())
         print_preview([unit])
         err = capsys.readouterr().err
         assert "INCIDENT RESPONSE" in err
@@ -1189,9 +1186,7 @@ class TestTmux:
             assert check_tmux_available() is False
 
     def test_check_tmux_when_present(self):
-        with patch(
-            "restitution.shutil.which", return_value="/usr/bin/tmux"
-        ):
+        with patch("restitution.shutil.which", return_value="/usr/bin/tmux"):
             assert check_tmux_available() is True
 
     def test_no_session_when_all_ir(self, capsys):
@@ -1201,9 +1196,7 @@ class TestTmux:
             label="ioc",
         )
         with patch("restitution.subprocess.run") as mock_run:
-            create_tmux_session(
-                [unit], "/tmp/pack", "test-session"
-            )
+            create_tmux_session([unit], "/tmp/pack", "test-session")
             mock_run.assert_not_called()
         err = capsys.readouterr().err
         assert "No launchable tasks" in err
@@ -1222,34 +1215,24 @@ class TestTmux:
                 root_path=f"/proj{i}",
             )
             units.append(u)
-            (launch_dir / f"{uid}-claude.sh").write_text(
-                "#!/usr/bin/env bash\n"
-            )
+            (launch_dir / f"{uid}-claude.sh").write_text("#!/usr/bin/env bash\n")
 
-        with patch("restitution.subprocess.run") as mock_run, \
-             patch(
-                 "restitution.check_tmux_available",
-                 return_value=True,
-             ):
-            create_tmux_session(
-                units, str(pack), "test-session"
-            )
+        with (
+            patch("restitution.subprocess.run") as mock_run,
+            patch(
+                "restitution.check_tmux_available",
+                return_value=True,
+            ),
+        ):
+            create_tmux_session(units, str(pack), "test-session")
 
         calls = mock_run.call_args_list
-        new_session_calls = [
-            c for c in calls
-            if "new-session" in c.args[0]
-        ]
-        new_window_calls = [
-            c for c in calls
-            if "new-window" in c.args[0]
-        ]
+        new_session_calls = [c for c in calls if "new-session" in c.args[0]]
+        new_window_calls = [c for c in calls if "new-window" in c.args[0]]
         assert len(new_session_calls) == 1
         assert len(new_window_calls) == 2
 
-    def test_inside_tmux_suggests_switch(
-        self, tmp_path, capsys, monkeypatch
-    ):
+    def test_inside_tmux_suggests_switch(self, tmp_path, capsys, monkeypatch):
         monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,123,0")
         unit = _make_work_unit(
             [_env_finding("/project/.env", ["K"])],
@@ -1257,18 +1240,16 @@ class TestTmux:
         pack = tmp_path / "pack"
         launch_dir = pack / "launch"
         launch_dir.mkdir(parents=True)
-        (launch_dir / "001-high-test-claude.sh").write_text(
-            "#!/usr/bin/env bash\n"
-        )
+        (launch_dir / "001-high-test-claude.sh").write_text("#!/usr/bin/env bash\n")
 
-        with patch("restitution.subprocess.run"), \
-             patch(
-                 "restitution.check_tmux_available",
-                 return_value=True,
-             ):
-            create_tmux_session(
-                [unit], str(pack), "test-session"
-            )
+        with (
+            patch("restitution.subprocess.run"),
+            patch(
+                "restitution.check_tmux_available",
+                return_value=True,
+            ),
+        ):
+            create_tmux_session([unit], str(pack), "test-session")
 
         err = capsys.readouterr().err
         assert "switch-client" in err
@@ -1281,39 +1262,325 @@ class TestTmux:
         pack = tmp_path / "pack with spaces"
         launch_dir = pack / "launch"
         launch_dir.mkdir(parents=True)
-        (launch_dir / "001-high-test-claude.sh").write_text(
-            "#!/usr/bin/env bash\n"
-        )
+        (launch_dir / "001-high-test-claude.sh").write_text("#!/usr/bin/env bash\n")
 
-        with patch("restitution.subprocess.run") as mock_run, \
-             patch(
-                 "restitution.check_tmux_available",
-                 return_value=True,
-             ):
-            create_tmux_session(
-                [unit], str(pack), "test-session"
-            )
+        with (
+            patch("restitution.subprocess.run") as mock_run,
+            patch(
+                "restitution.check_tmux_available",
+                return_value=True,
+            ),
+        ):
+            create_tmux_session([unit], str(pack), "test-session")
 
         cmd = mock_run.call_args_list[0].args[0]
         shell_arg = cmd[-1]
         assert '"' in shell_arg
 
-    def test_combined_warns_on_preview_tmux(
-        self, tmp_path, capsys
-    ):
+    def test_combined_warns_on_preview_tmux(self, tmp_path, capsys):
         """--combined should warn when --preview or --tmux are also
         passed rather than silently ignoring them."""
-        report = _minimal_report(
-            [_env_finding("/project/.env", ["K"])]
-        )
+        report = _minimal_report([_env_finding("/project/.env", ["K"])])
         p = tmp_path / "scan.json"
         p.write_text(json.dumps(report))
-        rc = main([
-            "--input", str(p),
-            "--dry-run",
-            "--combined",
-            "--preview",
-        ])
+        rc = main(
+            [
+                "--input",
+                str(p),
+                "--dry-run",
+                "--combined",
+                "--preview",
+            ]
+        )
         assert rc == 0
         err = capsys.readouterr().err
         assert "--combined ignores" in err
+
+
+# ── Environment lines ───────────────────────────────────────────────
+
+
+class TestGatherEnvironmentLines:
+    @patch("restitution.shutil.which", return_value="/usr/bin/op")
+    @patch("restitution._detect_op_ssh_agent", return_value=False)
+    def test_env_lines_with_op_installed(self, _det, _which):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        lines = _gather_environment_lines(unit)
+        text = "\n".join(lines)
+        assert "## Environment" in text
+        assert "Scanner:" in text
+        assert "1Password CLI:** installed" in text
+
+    @patch("restitution.shutil.which", return_value=None)
+    @patch("restitution._detect_op_ssh_agent", return_value=False)
+    def test_env_lines_without_op(self, _det, _which):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        lines = _gather_environment_lines(unit)
+        text = "\n".join(lines)
+        assert "1Password CLI:** not installed" in text
+
+    @patch("restitution.shutil.which", return_value="/usr/bin/op")
+    @patch("restitution._detect_op_ssh_agent", return_value=True)
+    def test_env_lines_ssh_agent_active(self, _det, _which):
+        unit = _make_work_unit(
+            [_ssh_finding()],
+            work_type="standalone",
+            label="ssh",
+            root_path="/Users/test/.ssh",
+        )
+        lines = _gather_environment_lines(unit)
+        text = "\n".join(lines)
+        assert "1Password SSH agent:** active" in text
+
+    @patch("restitution.shutil.which")
+    @patch("restitution._detect_op_ssh_agent", return_value=False)
+    def test_env_lines_kubectl_not_available(self, _det, mock_w):
+        mock_w.side_effect = lambda cmd: "/usr/bin/op" if cmd == "op" else None
+        raw = {
+            "category": "kubernetes",
+            "path": "/Users/test/.kube/config",
+            "severity": "medium",
+            "description": "Kubeconfig creds",
+            "remediation": "Use exec-based auth.",
+            "details": {},
+        }
+        unit = _make_work_unit(
+            [raw],
+            work_type="standalone",
+            label="kubernetes",
+            root_path="/Users/test/.kube",
+        )
+        lines = _gather_environment_lines(unit)
+        text = "\n".join(lines)
+        assert "kubectl:** not available" in text
+
+
+# ── Cloud provider detection ────────────────────────────────────────
+
+
+class TestDetectCloudProvider:
+    def test_aws(self):
+        assert _detect_cloud_provider("/Users/test/.aws/credentials") == "aws"
+
+    def test_gcp(self):
+        assert _detect_cloud_provider("/Users/test/.config/gcloud/adc.json") == "gcp"
+
+    def test_azure(self):
+        assert _detect_cloud_provider("/Users/test/.azure/accessTokens.json") == "azure"
+
+    def test_unknown(self):
+        assert _detect_cloud_provider("/Users/test/.somecloud/creds") == "unknown"
+
+    def test_aws_path_boundary(self):
+        """Ensure '.aws' only matches as a path segment."""
+        assert _detect_cloud_provider("/Users/test/drawsapp/config") == "unknown"
+
+
+# ── Token migrate branches ──────────────────────────────────────────
+
+
+class TestTokenMigrateBranches:
+    def test_pypirc(self):
+        raw = {
+            "category": "package_manager_tokens",
+            "path": "/Users/test/.pypirc",
+            "severity": "high",
+            "description": "PyPI token",
+            "remediation": "Use keyring.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "token_migrate", nfs, {})
+        assert "keyring" in md
+        assert "trusted publishers" in md
+
+    def test_docker(self):
+        raw = {
+            "category": "package_manager_tokens",
+            "path": "/Users/test/.docker/config.json",
+            "severity": "high",
+            "description": "Docker auth token",
+            "remediation": "Use docker login.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "token_migrate", nfs, {})
+        assert "docker login" in md
+        assert "osxkeychain" in md
+
+    def test_unknown_token(self):
+        raw = {
+            "category": "package_manager_tokens",
+            "path": "/Users/test/.gem/credentials",
+            "severity": "medium",
+            "description": "RubyGems token",
+            "remediation": "Rotate and store safely.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "token_migrate", nfs, {})
+        assert "Rotate and store safely." in md
+        assert "credential store" in md
+
+
+# ── Cloud migrate Azure branch ──────────────────────────────────────
+
+
+class TestCloudMigrateAzure:
+    def test_azure_branch(self):
+        raw = {
+            "category": "cloud_credentials",
+            "path": "/Users/test/.azure/accessTokens.json",
+            "severity": "high",
+            "description": "Azure credentials",
+            "remediation": "Use az login with SSO.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "cloud_migrate", nfs, {})
+        assert "azure" in md.lower()
+
+    def test_unknown_provider_branch(self):
+        raw = {
+            "category": "cloud_credentials",
+            "path": "/Users/test/.somecloud/creds",
+            "severity": "high",
+            "description": "Unknown cloud creds",
+            "remediation": "Rotate credentials.",
+            "details": {},
+        }
+        nfs = [normalize_finding(raw)]
+        md = compile_subtask_section(1, "cloud_migrate", nfs, {})
+        assert "unknown" in md.lower()
+
+
+# ── Index entry rendering ───────────────────────────────────────────
+
+
+class TestRenderIndexEntry:
+    def test_single_category_verify_command(self):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        lines = _render_index_entry(unit)
+        text = "\n".join(lines)
+        assert "--category env_files --pretty" in text
+
+    def test_multi_category_no_shell_comment(self):
+        """Multi-category units must not put a # comment
+        inside a shell command."""
+        raw_env = _env_finding("/project/.env", ["K"])
+        raw_ssh = _ssh_finding()
+        unit = _make_work_unit(
+            [raw_env, raw_ssh],
+        )
+        lines = _render_index_entry(unit)
+        text = "\n".join(lines)
+        assert "clawback.py --pretty`" in text
+        assert "# categories" not in text
+        assert "covers categories:" in text
+
+
+# ── pack_path parameter ─────────────────────────────────────────────
+
+
+class TestPackPath:
+    def test_task_file_with_pack_path(self):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        md = compile_task_file(unit, pack_path="/tmp/mypack")
+        assert "/tmp/mypack/index.md" in md
+
+    def test_task_file_without_pack_path(self):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        md = compile_task_file(unit)
+        assert "index.md" in md
+
+
+# ── SSH agent detection ─────────────────────────────────────────────
+
+
+class TestResolveOpSshSock:
+    def test_well_known_path_exists(self):
+        with patch("restitution.os.path.exists", return_value=True):
+            assert _resolve_op_ssh_sock() == OP_SSH_AGENT_SOCK
+
+    def test_well_known_path_missing_falls_through_to_env(self):
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": ""}, clear=False),
+        ):
+            assert _resolve_op_ssh_sock() is None
+
+    def test_ssh_auth_sock_with_1password_path(self, tmp_path):
+        sock_path = str(tmp_path / "1password-agent.sock")
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": sock_path}, clear=False),
+        ):
+            result = _resolve_op_ssh_sock()
+            assert result == sock_path
+
+    def test_ssh_auth_sock_symlink_to_1password(self, tmp_path):
+        target = tmp_path / "2BUA8C4S2C.com.1password" / "agent.sock"
+        target.parent.mkdir()
+        target.touch()
+        link = tmp_path / "agent-link.sock"
+        link.symlink_to(target)
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": str(link)}, clear=False),
+        ):
+            result = _resolve_op_ssh_sock()
+            assert result == str(link)
+
+    def test_ssh_auth_sock_unrelated_socket(self, tmp_path):
+        sock_path = str(tmp_path / "gnome-keyring" / "ssh")
+        with (
+            patch("restitution.os.path.exists", return_value=False),
+            patch.dict(os.environ, {"SSH_AUTH_SOCK": sock_path}, clear=False),
+        ):
+            assert _resolve_op_ssh_sock() is None
+
+
+class TestDetectOpSshAgent:
+    def test_returns_false_when_no_socket(self):
+        _detect_op_ssh_agent.cache_clear()
+        with (
+            patch("restitution._resolve_op_ssh_sock", return_value=None),
+        ):
+            assert _detect_op_ssh_agent() is False
+        _detect_op_ssh_agent.cache_clear()
+
+    def test_returns_true_when_socket_live(self):
+        _detect_op_ssh_agent.cache_clear()
+        with (
+            patch(
+                "restitution._resolve_op_ssh_sock",
+                return_value="/tmp/agent.sock",
+            ),
+            patch("restitution._socket_is_live", return_value=True),
+        ):
+            assert _detect_op_ssh_agent() is True
+        _detect_op_ssh_agent.cache_clear()
+
+    def test_returns_false_when_socket_stale(self):
+        _detect_op_ssh_agent.cache_clear()
+        with (
+            patch(
+                "restitution._resolve_op_ssh_sock",
+                return_value="/tmp/agent.sock",
+            ),
+            patch("restitution._socket_is_live", return_value=False),
+        ):
+            assert _detect_op_ssh_agent() is False
+        _detect_op_ssh_agent.cache_clear()
+
+
+# ── Verification wording ────────────────────────────────────────────
+
+
+class TestVerificationWording:
+    def test_task_file_verification_wording(self):
+        unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
+        md = compile_task_file(unit)
+        verify_section = md.split("## Verification")[1]
+        assert "Run a targeted" not in verify_section
+        assert "ignore any unrelated findings" in verify_section

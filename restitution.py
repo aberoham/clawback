@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
 import json
 import os
 import pathlib
+import shlex
 import shutil
+import socket as _socket
 import stat
 import subprocess
 import sys
@@ -56,6 +59,8 @@ def dim(t: str) -> str:
 
 # ── Constants ────────────────────────────────────────────────────────
 
+SCRIPT_DIR = str(pathlib.Path(__file__).resolve().parent)
+
 REQUIRED_REPORT_KEYS = {
     "findings",
     "summary",
@@ -91,6 +96,18 @@ FIX_TYPE_MAP: Dict[str, str] = {
     "kubernetes": "kubeconfig_migrate",
     "crypto_wallets": "wallet_secure",
     "teampcp_ioc": "incident_response",
+}
+
+GUIDE_MAP: Dict[str, str] = {
+    "env_files": "shell-env-secrets.md",
+    "shell_profile_secrets": "shell-env-secrets.md",
+    "environment_variables": "shell-env-secrets.md",
+    "ssh_keys": "ssh-keys.md",
+    "git_credentials": "git-credentials.md",
+    "cloud_credentials": "index.md",
+    "kubernetes": "kubernetes-kubeconfig.md",
+    "package_manager_tokens": "index.md",
+    "crypto_wallets": "crypto-wallets.md",
 }
 
 SEVERITY_ORDER = {
@@ -161,7 +178,7 @@ class NormalizedFinding:
 class OpMatch:
     """Result of a 1Password enrichment lookup for a single secret."""
 
-    status: str  # "exact", "ambiguous", "missing"
+    status: str  # "exact", "ambiguous", "missing", "unchecked"
     vault: Optional[str] = None
     item_title: Optional[str] = None
     field_name: Optional[str] = None
@@ -188,9 +205,7 @@ class WorkUnit:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="clawback-restitution",
-        description=(
-            "Remediation pack generator for clawback scan findings."
-        ),
+        description=("Remediation pack generator for clawback scan findings."),
     )
     p.add_argument(
         "--input",
@@ -203,10 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--output-dir",
-        help=(
-            "Pack destination "
-            "(default: ./tmp/restitution-packs/<timestamp>/)"
-        ),
+        help=("Pack destination (default: ./tmp/restitution-packs/<timestamp>/)"),
     )
     p.add_argument(
         "--combined",
@@ -230,9 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--tmux",
         action="store_true",
-        help=(
-            "Create a tmux session with one window per task"
-        ),
+        help=("Create a tmux session with one window per task"),
     )
     p.add_argument(
         "--version",
@@ -254,10 +264,7 @@ def load_report(path: Optional[str]) -> Dict[str, Any]:
             _fatal(f"Cannot read input file: {exc}")
     else:
         if sys.stdin.isatty():
-            _fatal(
-                "No input provided. "
-                "Pipe clawback JSON or use --input FILE."
-            )
+            _fatal("No input provided. Pipe clawback JSON or use --input FILE.")
         text = sys.stdin.read()
 
     try:
@@ -275,10 +282,7 @@ def validate_report(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     missing = REQUIRED_REPORT_KEYS - set(data.keys())
     if missing:
-        _fatal(
-            f"Report missing required fields: "
-            f"{', '.join(sorted(missing))}"
-        )
+        _fatal(f"Report missing required fields: {', '.join(sorted(missing))}")
 
     findings = data.get("findings")
     if not isinstance(findings, list):
@@ -289,10 +293,7 @@ def validate_report(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             _fatal(f"Finding #{i} is not a JSON object.")
         f_missing = REQUIRED_FINDING_KEYS - set(f.keys())
         if f_missing:
-            _fatal(
-                f"Finding #{i} missing fields: "
-                f"{', '.join(sorted(f_missing))}"
-            )
+            _fatal(f"Finding #{i} missing fields: {', '.join(sorted(f_missing))}")
 
     return findings
 
@@ -537,9 +538,7 @@ def op_item_search(
     for item in items:
         title = item.get("title", "")
         title_lower = title.lower()
-        title_parts = set(
-            title_lower.replace("-", "_").replace(" ", "_").split("_")
-        )
+        title_parts = set(title_lower.replace("-", "_").replace(" ", "_").split("_"))
         if query_lower == title_lower:
             matches.insert(0, item)
         elif query_parts & title_parts:
@@ -629,10 +628,7 @@ def enrich_variable(
 
     return OpMatch(
         status="ambiguous",
-        candidates=[
-            {"vault": c["vault"], "title": c["title"]}
-            for c in all_candidates
-        ],
+        candidates=[{"vault": c["vault"], "title": c["title"]} for c in all_candidates],
     )
 
 
@@ -685,7 +681,7 @@ def _apply_placeholder_enrichment(
     """Fill enrichment with placeholder OpMatch objects."""
     for unit in units:
         for var in _extract_var_names(unit):
-            unit.enrichment[var] = OpMatch(status="missing")
+            unit.enrichment[var] = OpMatch(status="unchecked")
 
 
 def _extract_var_names(unit: WorkUnit) -> List[str]:
@@ -705,6 +701,103 @@ def _extract_var_names(unit: WorkUnit) -> List[str]:
 
 
 # ── Prompt helpers ───────────────────────────────────────────────────
+
+OP_SSH_AGENT_SOCK = os.path.expanduser(
+    "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _detect_op_ssh_agent() -> bool:
+    """Check if the 1Password SSH agent is live.
+
+    Detection is intentionally broad: a live socket at the well-known
+    path is sufficient. We also accept SSH_AUTH_SOCK pointing to the
+    1Password socket (directly or via symlink), which covers setups
+    that configure the agent through shell profile, launchd, or
+    Include-based ssh_config rather than a literal IdentityAgent line.
+    """
+    sock_path = _resolve_op_ssh_sock()
+    if not sock_path:
+        return False
+    return _socket_is_live(sock_path)
+
+
+def _resolve_op_ssh_sock() -> Optional[str]:
+    """Return the 1Password agent socket path if one can be found."""
+    if os.path.exists(OP_SSH_AGENT_SOCK):
+        return OP_SSH_AGENT_SOCK
+
+    auth_sock = os.environ.get("SSH_AUTH_SOCK", "")
+    if not auth_sock:
+        return None
+    try:
+        resolved = str(pathlib.Path(auth_sock).resolve())
+    except OSError:
+        return None
+    if "1password" in resolved.lower() or "2BUA8C4S2C" in resolved:
+        return auth_sock
+    return None
+
+
+def _socket_is_live(path: str) -> bool:
+    """Return True if the Unix socket at path accepts a connection."""
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        sock.settimeout(1)
+        sock.connect(path)
+    except (OSError, _socket.timeout):
+        return False
+    finally:
+        sock.close()
+    return True
+
+
+def _gather_environment_lines(
+    unit: "WorkUnit",
+) -> List[str]:
+    """Build the ## Environment section lines for a task file.
+
+    Runs read-only checks at pack-generation time so agents do
+    not waste cycles re-discovering tool availability.
+    """
+    lines: List[str] = [
+        "## Environment",
+        "",
+    ]
+
+    lines.append(
+        f"- **Scanner:** `{SCRIPT_DIR}/clawback.py` (run with `uv run python`)"
+    )
+
+    categories = sorted(set(nf.category for nf in unit.findings))
+    guide_files = sorted(set(GUIDE_MAP.get(c, "index.md") for c in categories))
+    for gf in guide_files:
+        guide_path = f"{SCRIPT_DIR}/docs/guides/{gf}"
+        lines.append(f"- **Remediation guide:** `{guide_path}`")
+
+    op_path = shutil.which("op")
+    if op_path:
+        lines.append("- **1Password CLI:** installed")
+    else:
+        lines.append("- **1Password CLI:** not installed")
+
+    has_ssh = any(nf.fix_type == "ssh_harden" for nf in unit.findings)
+    if has_ssh:
+        if _detect_op_ssh_agent():
+            lines.append(f"- **1Password SSH agent:** active (`{OP_SSH_AGENT_SOCK}`)")
+        else:
+            lines.append("- **1Password SSH agent:** not detected")
+
+    has_kube = any(nf.fix_type == "kubeconfig_migrate" for nf in unit.findings)
+    if has_kube:
+        kubectl_path = shutil.which("kubectl")
+        if kubectl_path:
+            lines.append("- **kubectl:** installed")
+        else:
+            lines.append("- **kubectl:** not available — edit config files directly")
+
+    return lines
 
 
 def _collect_env_vars(
@@ -749,6 +842,15 @@ def _format_op_match(
     match: Optional[OpMatch],
 ) -> List[str]:
     """Format a single 1Password match result as markdown lines."""
+    if match and match.status == "unchecked":
+        safe_name = "".join(c for c in var_name if c.isalnum() or c == "_")
+        return [
+            f"- `{var_name}`: **NOT CHECKED** — 1Password was "
+            "not queried (dry-run or `op` unavailable). Search "
+            "manually before proceeding:",
+            f'  `op item list --format json | grep -i "{safe_name}"`',
+        ]
+
     if not match or match.status == "missing":
         return [
             f"- `{var_name}`: **NOT FOUND** in 1Password. "
@@ -757,19 +859,15 @@ def _format_op_match(
 
     if match.status == "exact":
         return [
-            f'- `{var_name}`: **FOUND** in vault "{match.vault}" '
-            f'→ `{match.reference}`',
+            f'- `{var_name}`: **FOUND** in vault "{match.vault}" → `{match.reference}`',
         ]
 
     if match.status == "ambiguous":
         lines = [
-            f"- `{var_name}`: **AMBIGUOUS** — multiple "
-            "candidates found:",
+            f"- `{var_name}`: **AMBIGUOUS** — multiple candidates found:",
         ]
         for c in match.candidates or []:
-            lines.append(
-                f'  - Vault "{c["vault"]}": "{c["title"]}"'
-            )
+            lines.append(f'  - Vault "{c["vault"]}": "{c["title"]}"')
         return lines
 
     return [f"- `{var_name}`: status unknown"]
@@ -794,9 +892,7 @@ def _basename(path: str) -> str:
 def _safe_filename(path: str) -> str:
     """Convert a path to a safe filename fragment."""
     name = pathlib.PurePosixPath(path).name or path
-    safe = "".join(
-        c if c.isalnum() or c in "-_." else "-" for c in name
-    )
+    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in name)
     return safe[:60]
 
 
@@ -821,9 +917,7 @@ def _subtask_groups(
             order.append(key)
         buckets[key].append(nf)
 
-    result = [
-        (ft, path, buckets[(ft, path)]) for ft, path in order
-    ]
+    result = [(ft, path, buckets[(ft, path)]) for ft, path in order]
     result.sort(
         key=lambda x: (
             min(SEVERITY_ORDER.get(nf.severity, 99) for nf in x[2]),
@@ -849,6 +943,98 @@ def compile_subtask_section(
     return _section_generic(num, findings, enrichment)
 
 
+OP_SYNTAX_LINES = [
+    "",
+    "   Create a new item:",
+    "   ```",
+    '   op item create --vault "VaultName" '
+    '--category "API Credential" '
+    "--title \"Name\" 'credential=value'",
+    "   ```",
+    "   Add a field to an existing item:",
+    "   ```",
+    '   op item edit "ItemTitle" --vault "VaultName" \'new-field=value\'',
+    "   ```",
+]
+
+
+def _env_rewrite_steps(
+    path: str,
+    all_vars: List[Dict[str, Any]],
+    enrichment: Dict[str, OpMatch],
+) -> List[str]:
+    """Build the numbered remediation steps for env rewrite."""
+    all_unchecked = bool(all_vars) and all(
+        enrichment.get(v["name"]) and enrichment[v["name"]].status == "unchecked"
+        for v in all_vars
+    )
+
+    if all_unchecked:
+        op_step_text = (
+            "2. **Check 1Password for existing items.** Each "
+            "secret above was NOT CHECKED — verify whether it "
+            "already exists before creating new items. Only "
+            "store secrets that are genuinely missing. Verify "
+            'with `op read "op://..."`.'
+        )
+    else:
+        op_step_text = (
+            "2. **Create missing 1Password items.** For each "
+            "secret marked NOT FOUND above, store the current "
+            "plaintext value in 1Password. Verify with "
+            '`op read "op://..."`.'
+        )
+
+    lines: List[str] = [
+        "",
+        "**What to do**",
+        "",
+        f"1. **Find what consumes `{_basename(path)}`.** "
+        "Search the project for `dotenv` / `load_dotenv` "
+        "imports, `docker-compose.yml` `env_file:` directives, "
+        "shell scripts that `source` this file, Makefile "
+        "targets, and framework-specific env loading. This "
+        "informs the `op run` setup in step 5.",
+        "",
+        op_step_text,
+        *OP_SYNTAX_LINES,
+        "",
+        f"3. **Back up the original file.** Copy "
+        f"`{_basename(path)}` to "
+        f"`{_basename(path)}.plaintext.bak`.",
+        "",
+        "4. **Rewrite the file.** Replace each secret value "
+        "with its `op://` reference. Preserve all comments, "
+        "non-secret lines, and formatting. Example:",
+        "   ```",
+    ]
+
+    if all_vars and all_vars[0].get("reference"):
+        v = all_vars[0]
+        lines.append(f"   {v['name']}={v['reference']}")
+    else:
+        lines.append("   SECRET_NAME=op://VaultName/ItemTitle/credential")
+
+    lines.extend(
+        [
+            "   ```",
+            "",
+            "5. **Set up `op run`.** Based on step 1:",
+            "   ```",
+            f"   op run --env-file {shlex.quote(path)} -- <the-command>",
+            "   ```",
+            "   Add this as a note in the project README or a wrapper script.",
+            "",
+            f"6. **Check `.gitignore`.** Ensure `{_basename(path)}` "
+            f"and `{_basename(path)}.plaintext.bak` are listed.",
+            "",
+            "7. **Delete the plaintext backup** once `op run` "
+            "works and the secret is safely in 1Password.",
+        ]
+    )
+    return lines
+
+
 def _section_env_rewrite(
     num: int,
     findings: List[NormalizedFinding],
@@ -862,8 +1048,7 @@ def _section_env_rewrite(
     lines = [
         f"### {num}. Secure secrets in `{_basename(path)}`",
         "",
-        f"File `{path}` contains plaintext secrets "
-        f"({severity} severity):",
+        f"File `{path}` contains plaintext secrets ({severity} severity):",
         "",
     ]
 
@@ -879,59 +1064,7 @@ def _section_env_rewrite(
         name = var_info["name"]
         lines.extend(_format_op_match(name, enrichment.get(name)))
 
-    lines.extend(
-        [
-            "",
-            "**What to do**",
-            "",
-            "1. **Create missing 1Password items.** For each secret "
-            "marked NOT FOUND above, store the current plaintext "
-            "value in 1Password. Verify with "
-            '`op read "op://..."`.',
-            "",
-            f"2. **Back up the original file.** Copy "
-            f"`{_basename(path)}` to "
-            f"`{_basename(path)}.plaintext.bak`.",
-            "",
-            "3. **Rewrite the file.** Replace each secret value "
-            "with its `op://` reference. Preserve all comments, "
-            "non-secret lines, and formatting. Example:",
-            "   ```",
-        ]
-    )
-
-    if all_vars and all_vars[0].get("reference"):
-        v = all_vars[0]
-        lines.append(f"   {v['name']}={v['reference']}")
-    else:
-        lines.append(
-            "   SECRET_NAME=op://VaultName/ItemTitle/credential"
-        )
-
-    lines.extend(
-        [
-            "   ```",
-            "",
-            f"4. **Find what consumes `{_basename(path)}`.** "
-            "Search the project for `dotenv` / `load_dotenv` "
-            "imports, `docker-compose.yml` `env_file:` directives, "
-            "shell scripts that `source` this file, Makefile "
-            "targets, and framework-specific env loading.",
-            "",
-            "5. **Set up `op run`.** Based on step 4:",
-            "   ```",
-            f"   op run --env-file {path} -- <the-command>",
-            "   ```",
-            "   Add this as a note in the project README or a "
-            "wrapper script.",
-            "",
-            f"6. **Check `.gitignore`.** Ensure `{_basename(path)}` "
-            f"and `{_basename(path)}.plaintext.bak` are listed.",
-            "",
-            "7. **Delete the plaintext backup** once `op run` "
-            "works and the secret is safely in 1Password.",
-        ]
-    )
+    lines.extend(_env_rewrite_steps(path, all_vars, enrichment))
 
     return "\n".join(lines)
 
@@ -948,8 +1081,7 @@ def _section_profile_rewrite(
     lines = [
         f"### {num}. Remove secrets from `{_basename(path)}`",
         "",
-        f"Shell profile `{path}` contains exported secrets "
-        f"({severity} severity):",
+        f"Shell profile `{path}` contains exported secrets ({severity} severity):",
         "",
     ]
 
@@ -958,9 +1090,7 @@ def _section_profile_rewrite(
         line_num = nf.line
         reason = nf.reason or "detected as secret"
         loc = f":{line_num}" if line_num else ""
-        lines.append(
-            f"- `{var}` at `{_basename(path)}{loc}` — {reason}"
-        )
+        lines.append(f"- `{var}` at `{_basename(path)}{loc}` — {reason}")
 
     lines.extend(["", "**1Password status**", ""])
     for nf in findings:
@@ -978,6 +1108,12 @@ def _section_profile_rewrite(
             "1. **Ensure the value is in 1Password.** If not found "
             "above, store it manually before removing it from the "
             "profile.",
+            "",
+            "   ```",
+            '   op item create --vault "VaultName" '
+            '--category "API Credential" '
+            "--title \"Name\" 'credential=value'",
+            "   ```",
             "",
             f"2. **Remove the export line** from `{path}`. Do not "
             "comment it out — delete it entirely.",
@@ -1056,8 +1192,7 @@ def _section_env_var_trace(
             "",
             "Once you find the source:",
             "",
-            "1. **Store the value in 1Password** if not already "
-            "there.",
+            "1. **Store the value in 1Password** if not already there.",
             "2. **Remove the plaintext assignment** at the source.",
             "3. **Replace with `op run` or `op read`** at the "
             "point where the variable is actually needed.",
@@ -1065,6 +1200,99 @@ def _section_env_var_trace(
     )
 
     return "\n".join(lines)
+
+
+def _ssh_op_import_steps(path: str) -> List[str]:
+    """Return the 1Password SSH import instruction lines."""
+    return [
+        "",
+        "   **Important:** SSH key import requires the "
+        "1Password desktop app — the CLI cannot import "
+        "existing keys.",
+        "   `op item create --ssh-generate-key` only "
+        "generates new keys; it cannot import.",
+        "",
+        "   Steps:",
+        "   1. Open 1Password desktop app → vault → + → SSH Key → Import",
+        f"   2. Select `{path}`",
+        "   3. Verify the key is served by the agent:",
+        "      ```",
+        '      SSH_AUTH_SOCK="$HOME/Library/Group Containers'
+        '/2BUA8C4S2C.com.1password/t/agent.sock" ssh-add -l',
+        "      ```",
+        f"   4. Once confirmed, delete the private key: `rm {shlex.quote(path)}`",
+        "      (keep the `.pub` file — it is not sensitive)",
+    ]
+
+
+def _ssh_dependent_checklist() -> List[str]:
+    """Return the SSH key dependent-services checklist."""
+    return [
+        "   - `~/.ssh/config` for `IdentityFile` entries",
+        "   - Git remote URLs that use SSH",
+        "   - CI/CD pipelines or deploy scripts",
+        "   - Cron jobs or automation that SSH to remote hosts",
+        "",
+    ]
+
+
+def _ssh_remediation_steps(
+    path: str,
+    permissions: Optional[str],
+    encrypted: Optional[bool],
+    op_ssh_active: bool,
+) -> List[str]:
+    """Build the numbered SSH remediation steps."""
+    lines: List[str] = ["", "**What to do**", ""]
+    step = 1
+
+    if permissions and permissions != "0o600":
+        lines.append(f"{step}. **Fix permissions immediately:**")
+        lines.append("   ```")
+        lines.append(f"   chmod 600 {shlex.quote(path)}")
+        lines.append("   ```")
+        lines.append("")
+        step += 1
+
+    if op_ssh_active:
+        lines.append(
+            f"{step}. **Import into 1Password SSH agent.** "
+            "The agent is already active on this machine — "
+            "this is the recommended path."
+        )
+        lines.extend(_ssh_op_import_steps(path))
+        lines.append("")
+        step += 1
+
+        lines.append(f"{step}. **Check which services use this key.** Look at:")
+        lines.extend(_ssh_dependent_checklist())
+    else:
+        if encrypted is False:
+            lines.append(f"{step}. **Add a passphrase:**")
+            lines.append("   ```")
+            lines.append(f"   ssh-keygen -p -f {shlex.quote(path)}")
+            lines.append("   ```")
+            lines.append("")
+            step += 1
+
+            lines.append(f"{step}. **Store the passphrase in macOS Keychain:**")
+            lines.append("   ```")
+            lines.append(f"   ssh-add --apple-use-keychain {shlex.quote(path)}")
+            lines.append("   ```")
+            lines.append("")
+            step += 1
+
+        lines.append(f"{step}. **Check which services use this key.** Look at:")
+        lines.extend(_ssh_dependent_checklist())
+        step += 1
+
+        lines.append(
+            f"{step}. **Consider 1Password SSH agent.** "
+            "This eliminates the key file from disk entirely."
+        )
+        lines.extend(_ssh_op_import_steps(path))
+
+    return lines
 
 
 def _section_ssh_harden(
@@ -1102,54 +1330,21 @@ def _section_ssh_harden(
         lines.append(f"- **Permissions:** {permissions}")
     lines.append(f"- **Severity:** {severity}")
 
-    lines.extend(["", "**What to do**", ""])
+    op_ssh_active = _detect_op_ssh_agent()
 
-    step = 1
+    lines.extend(["", "**Pre-conditions detected:**", ""])
+    if op_ssh_active:
+        lines.append(f"- 1Password SSH agent: **active** (`{OP_SSH_AGENT_SOCK}`)")
+    else:
+        lines.append("- 1Password SSH agent: not detected")
 
-    if permissions and permissions != "0o600":
-        lines.append(f"{step}. **Fix permissions immediately:**")
-        lines.append("   ```")
-        lines.append(f"   chmod 600 {path}")
-        lines.append("   ```")
-        lines.append("")
-        step += 1
-
-    if encrypted is False:
-        lines.append(f"{step}. **Add a passphrase:**")
-        lines.append("   ```")
-        lines.append(f"   ssh-keygen -p -f {path}")
-        lines.append("   ```")
-        lines.append("")
-        step += 1
-
-        lines.append(
-            f"{step}. **Store the passphrase in macOS Keychain:**"
-        )
-        lines.append("   ```")
-        lines.append(f"   ssh-add --apple-use-keychain {path}")
-        lines.append("   ```")
-        lines.append("")
-        step += 1
-
-    lines.append(
-        f"{step}. **Check which services use this key.** Look at:"
-    )
     lines.extend(
-        [
-            "   - `~/.ssh/config` for `IdentityFile` entries",
-            "   - Git remote URLs that use SSH",
-            "   - CI/CD pipelines or deploy scripts",
-            "   - Cron jobs or automation that SSH to remote hosts",
-            "",
-        ]
-    )
-    step += 1
-
-    lines.append(
-        f"{step}. **Consider 1Password SSH agent.** This eliminates "
-        "the key file from disk entirely. The private key lives "
-        "only in 1Password and is served via the 1Password SSH "
-        "agent."
+        _ssh_remediation_steps(
+            path,
+            permissions,
+            encrypted,
+            op_ssh_active,
+        )
     )
 
     return "\n".join(lines)
@@ -1185,10 +1380,362 @@ def _section_incident_response(
             "present on this machine.",
             "5. Rebuild from a clean image.",
             "",
-            "Do not attempt automated remediation for these "
-            "findings.",
+            "Do not attempt automated remediation for these findings.",
         ]
     )
+
+    return "\n".join(lines)
+
+
+def _section_git_credential_store(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for git credential store remediation."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+
+    lines = [
+        f"### {num}. Migrate git credentials from `{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+        "1. **Switch to macOS Keychain credential helper:**",
+        "   ```",
+        "   git config --global --unset-all credential.helper",
+        "   git config --global credential.helper osxkeychain",
+        "   ```",
+        "",
+        "2. **Delete the plaintext credential file:**",
+        "   ```",
+        f"   rm {shlex.quote(path)}",
+        "   ```",
+        "",
+        "3. **Clear cached Keychain entries** (forces re-authentication):",
+        "   ```",
+        "   printf 'host=github.com\\nprotocol=https\\n\\n'"
+        " | git credential-osxkeychain erase",
+        "   ```",
+        "   Repeat for each host in the credential file "
+        "(e.g. `gitlab.com`, `bitbucket.org`).",
+        "",
+        "4. **Verify by cloning or pulling** a private repo "
+        "to trigger the Keychain credential prompt.",
+        "",
+        "5. **Alternative: use GitHub CLI** for a smoother OAuth flow:",
+        "   ```",
+        "   gh auth login",
+        "   gh auth setup-git",
+        "   ```",
+    ]
+
+    return "\n".join(lines)
+
+
+def _detect_cloud_provider(path: str) -> str:
+    """Guess the cloud provider from the finding path."""
+    lower = path.lower()
+    if "/.aws/" in lower or "/.aws" == lower[-4:]:
+        return "aws"
+    if "/gcloud/" in lower or "/gcp/" in lower:
+        return "gcp"
+    if "/.azure/" in lower or "/.azure" == lower[-6:]:
+        return "azure"
+    return "unknown"
+
+
+def _section_cloud_migrate(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for cloud credential migration."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+    provider = _detect_cloud_provider(path)
+
+    lines = [
+        f"### {num}. Remediate cloud credentials at `{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Provider:** {provider}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+    ]
+
+    if provider == "aws":
+        lines.extend(
+            [
+                "1. **Switch to AWS SSO:**",
+                "   ```",
+                "   aws configure sso",
+                "   aws sso login --profile <profile>",
+                "   ```",
+                "",
+                "2. **Delete static access keys** from the "
+                "AWS console (IAM → Users → Security "
+                "credentials → Delete access key).",
+                "",
+                "3. **Remove the local credentials file:**",
+                f"   `rm {path}`",
+                "",
+                "4. **Unset environment variables** if set: "
+                "`AWS_ACCESS_KEY_ID`, "
+                "`AWS_SECRET_ACCESS_KEY`, "
+                "`AWS_SESSION_TOKEN`.",
+            ]
+        )
+    elif provider == "gcp":
+        lines.extend(
+            [
+                "1. **Revoke application default credentials:**",
+                "   ```",
+                "   gcloud auth application-default revoke",
+                "   ```",
+                "",
+                "2. **Use `gcloud auth login`** for "
+                "interactive work. For service accounts, use "
+                "workload identity federation instead of "
+                "downloaded key files.",
+                "",
+                "3. **If the file is a service account key,** "
+                "delete it from the GCP console (IAM → "
+                "Service accounts → Keys → Delete) and "
+                f"remove: `rm {shlex.quote(path)}`",
+            ]
+        )
+    elif provider == "azure":
+        lines.extend(
+            [
+                "1. **Re-authenticate with device code flow:**",
+                "   ```",
+                "   az login",
+                "   ```",
+                "",
+                "2. **Clear cached tokens:**",
+                "   ```",
+                "   az account clear",
+                "   ```",
+                "",
+                "3. **For service principals,** rotate the "
+                "client secret in the Azure portal and use "
+                "managed identity where possible.",
+            ]
+        )
+    else:
+        lines.append(findings[0].remediation)
+
+    guide = GUIDE_MAP.get("cloud_credentials", "index.md")
+    lines.extend(
+        [
+            "",
+            f"See the full remediation guide at `{SCRIPT_DIR}/docs/guides/{guide}`.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def _section_kubeconfig_migrate(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for kubeconfig credential migration."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+    kubectl_available = shutil.which("kubectl") is not None
+
+    lines = [
+        f"### {num}. Secure kubeconfig at `{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+    ]
+    if not kubectl_available:
+        lines.append(
+            "- **Note:** `kubectl` is not installed — edit the config file directly"
+        )
+
+    lines.extend(["", "**What to do**", ""])
+
+    lines.extend(
+        [
+            "1. **Switch to exec-based auth plugins.** "
+            "These generate short-lived tokens instead of "
+            "storing static credentials:",
+            "   - **AWS EKS:** `aws eks update-kubeconfig --name <CLUSTER>`",
+            "   - **GKE:** `gcloud container clusters get-credentials <CLUSTER>`",
+            "   - **AKS:** `az aks get-credentials "
+            "--resource-group <RG> --name <CLUSTER>` "
+            "then `kubelogin convert-kubeconfig -l azurecli`",
+            "",
+            "2. **Remove stale contexts and users** with embedded credentials:",
+        ]
+    )
+
+    if kubectl_available:
+        lines.extend(
+            [
+                "   ```",
+                "   kubectl config delete-context <STALE_CONTEXT>",
+                "   kubectl config unset users.<STALE_USER>",
+                "   ```",
+            ]
+        )
+    else:
+        lines.append(
+            f"   Edit `{path}` directly: remove `user:` "
+            "entries that contain `client-certificate-data`, "
+            "`client-key-data`, `token:`, or `password:` "
+            "fields."
+        )
+
+    lines.extend(
+        [
+            "",
+            "3. **Fix file permissions:**",
+            f"   `chmod 600 {shlex.quote(path)}`",
+            "",
+            "4. **Verify no embedded credentials remain** "
+            "by inspecting the `users:` section of the "
+            "config for `client-certificate-data:`, "
+            "`client-key-data:`, `token:`, or `password:` "
+            "fields.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def _section_token_migrate(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for package manager token migration."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+    basename = _basename(path)
+
+    lines = [
+        f"### {num}. Migrate token in `{basename}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+    ]
+
+    lower = path.lower()
+    if ".npmrc" in lower:
+        lines.extend(
+            [
+                "1. **Remove the token from `.npmrc`:**",
+                "   Delete or comment out the "
+                "`//registry.npmjs.org/:_authToken=` line.",
+                "",
+                "2. **Use `npm login` instead** — this "
+                "stores credentials in the OS keychain on "
+                "macOS.",
+                "",
+                "3. **For CI, use `NPM_TOKEN` env var** "
+                "injected from 1Password or a secrets "
+                "manager, not a static `.npmrc`.",
+            ]
+        )
+    elif ".pypirc" in lower or "/pip/" in lower or "pip.conf" in lower:
+        lines.extend(
+            [
+                "1. **Remove tokens from `.pypirc`.**",
+                "",
+                "2. **Use `keyring` for PyPI uploads:**",
+                "   ```",
+                "   pip install keyring",
+                "   keyring set https://upload.pypi.org/legacy/ __token__",
+                "   ```",
+                "",
+                "3. **For CI, use trusted publishers** (OIDC) instead of API tokens.",
+            ]
+        )
+    elif "docker" in lower:
+        lines.extend(
+            [
+                "1. **Use `docker login`** — on macOS this "
+                "stores credentials in the Keychain via "
+                "the `osxkeychain` credential helper.",
+                "",
+                "2. **Remove plaintext auth** from "
+                f"`{path}` — delete the `auths` section "
+                "containing base64-encoded credentials.",
+                "",
+                "3. **Verify credential helper is active:**",
+                "   `docker-credential-osxkeychain list`",
+            ]
+        )
+    else:
+        lines.append(findings[0].remediation)
+        lines.extend(
+            [
+                "",
+                "Move the token to 1Password or the "
+                "platform's native credential store, then "
+                "delete the plaintext file.",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def _section_wallet_secure(
+    num: int,
+    findings: List[NormalizedFinding],
+    enrichment: Dict[str, OpMatch],
+) -> str:
+    """Subtask section for cryptocurrency wallet security."""
+    path = findings[0].path
+    severity = _worst_severity(findings)
+
+    lines = [
+        f"### {num}. Secure wallet at `{_basename(path)}`",
+        "",
+        f"- **Path:** `{path}`",
+        f"- **Severity:** {severity}",
+        f"- **Description:** {findings[0].description}",
+        "",
+        "**What to do**",
+        "",
+        "1. **Ensure FileVault full-disk encryption is enabled:**",
+        "   ```",
+        "   fdesetup status",
+        "   ```",
+        "   If not active: `sudo fdesetup enable`",
+        "",
+        "2. **Back up the wallet** to an encrypted "
+        "medium (1Password document, encrypted USB) "
+        "before making any other changes.",
+        "",
+        "3. **Move funds to a hardware wallet** (Ledger, "
+        "Trezor) if the balance is non-trivial. Keep only "
+        "operational minimums in hot wallets.",
+        "",
+        "4. **For Solana keypairs,** switch to hardware wallet delegation:",
+        "   `solana config set --keypair usb://ledger`",
+        "",
+        "5. **Restrict file permissions:**",
+        f"   `chmod 600 {shlex.quote(path)}`",
+    ]
 
     return "\n".join(lines)
 
@@ -1200,6 +1747,9 @@ def _section_generic(
 ) -> str:
     """Subtask section for categories without specialized templates."""
     nf = findings[0]
+
+    guide = GUIDE_MAP.get(nf.category, "index.md")
+    guide_path = f"{SCRIPT_DIR}/docs/guides/{guide}"
 
     lines = [
         f"### {num}. Address {nf.category} finding",
@@ -1213,8 +1763,7 @@ def _section_generic(
         "",
         nf.remediation,
         "",
-        "Review the clawback documentation for this category "
-        "for detailed remediation steps.",
+        f"See the remediation guide at `{guide_path}` for detailed steps.",
     ]
 
     return "\n".join(lines)
@@ -1225,18 +1774,68 @@ SECTION_COMPILERS = {
     "profile_rewrite": _section_profile_rewrite,
     "env_var_trace": _section_env_var_trace,
     "ssh_harden": _section_ssh_harden,
+    "git_credential_store": _section_git_credential_store,
+    "cloud_migrate": _section_cloud_migrate,
+    "kubeconfig_migrate": _section_kubeconfig_migrate,
+    "token_migrate": _section_token_migrate,
+    "wallet_secure": _section_wallet_secure,
 }
 
 
 # ── Task file compilation ────────────────────────────────────────────
 
 
-def compile_task_file(unit: WorkUnit) -> str:
+def _compile_verification_tail(
+    unit: WorkUnit,
+    pack_path: Optional[str],
+) -> List[str]:
+    """Build the Verification and Pack status sections."""
+    lines: List[str] = []
+    ver_paths = sorted(
+        set(nf.path for nf in unit.findings if not nf.path.startswith("env:"))
+    )
+    categories = sorted(set(nf.category for nf in unit.findings))
+    lines.append(
+        "Run clawback and confirm the findings for these "
+        "specific paths no longer appear. The scan covers the "
+        "full category, so ignore any unrelated findings from "
+        "other paths:"
+    )
+    lines.append("")
+    lines.append("```bash")
+    lines.append(f"cd {SCRIPT_DIR}")
+    if len(categories) == 1:
+        lines.append(f"uv run python clawback.py --category {categories[0]} --pretty")
+    else:
+        lines.append("uv run python clawback.py --pretty")
+    lines.append("```")
+    if ver_paths:
+        lines.append("")
+        lines.append("Affected paths to verify:")
+        for p in ver_paths:
+            lines.append(f"- `{p}`")
+
+    if pack_path:
+        index_ref = f"`{pack_path}/index.md`"
+    else:
+        index_ref = "`index.md`"
+    lines.extend(
+        [
+            "",
+            "## Pack status",
+            "",
+            f"Update the checkbox for this task in {index_ref} when complete.",
+        ]
+    )
+    return lines
+
+
+def compile_task_file(
+    unit: WorkUnit,
+    pack_path: Optional[str] = None,
+) -> str:
     """Compile a WorkUnit into a complete agent-ready task file."""
-    if all(
-        nf.fix_type == "incident_response"
-        for nf in unit.findings
-    ):
+    if all(nf.fix_type == "incident_response" for nf in unit.findings):
         return _compile_incident_response_task(unit)
 
     lines = [
@@ -1252,23 +1851,21 @@ def compile_task_file(unit: WorkUnit) -> str:
 
     if unit.work_type == "repo":
         lines.append(
-            f"This task covers all findings within the "
-            f"`{unit.label}` repository."
+            f"This task covers all findings within the `{unit.label}` repository."
         )
     else:
         lines.append(
-            f"This task covers findings in the `{unit.label}` "
-            f"configuration area."
+            f"This task covers findings in the `{unit.label}` configuration area."
         )
     lines.extend(
         [
-            "Out of scope: findings in other repositories or "
-            "unrelated system areas.",
-            "",
-            "## Findings",
+            "Out of scope: findings in other repositories or unrelated system areas.",
             "",
         ]
     )
+
+    lines.extend(_gather_environment_lines(unit))
+    lines.extend(["", "## Findings", ""])
 
     cats: Dict[str, List[NormalizedFinding]] = {}
     for nf in unit.findings:
@@ -1276,17 +1873,13 @@ def compile_task_file(unit: WorkUnit) -> str:
     for cat, nfs in sorted(cats.items()):
         paths = sorted(set(nf.path for nf in nfs))
         path_str = ", ".join(f"`{_basename(p)}`" for p in paths)
-        lines.append(
-            f"- **{cat}**: {len(nfs)} finding(s) in {path_str}"
-        )
+        lines.append(f"- **{cat}**: {len(nfs)} finding(s) in {path_str}")
 
     lines.extend(["", "## Subtasks", ""])
 
     groups = _subtask_groups(unit.findings)
     for i, (fix_type, _path, nfs) in enumerate(groups, 1):
-        section = compile_subtask_section(
-            i, fix_type, nfs, unit.enrichment
-        )
+        section = compile_subtask_section(i, fix_type, nfs, unit.enrichment)
         lines.append(section)
         lines.append("")
 
@@ -1294,10 +1887,8 @@ def compile_task_file(unit: WorkUnit) -> str:
         [
             "## Constraints",
             "",
-            "- Do not relocate plaintext secrets to different "
-            "plaintext files",
-            "- Delete or neutralize orphaned credential files "
-            "after migration",
+            "- Do not relocate plaintext secrets to different plaintext files",
+            "- Delete or neutralize orphaned credential files after migration",
             "- Preserve comments and formatting in edited files",
             "- Prefer targeted edits over unrelated cleanup",
             "",
@@ -1306,34 +1897,7 @@ def compile_task_file(unit: WorkUnit) -> str:
         ]
     )
 
-    ver_paths = sorted(
-        set(
-            nf.path
-            for nf in unit.findings
-            if not nf.path.startswith("env:")
-        )
-    )
-    lines.append("Run a full clawback scan and check that ")
-    lines.append("the findings for these paths are resolved:")
-    lines.append("")
-    lines.append("```")
-    lines.append("clawback.py --json")
-    lines.append("```")
-    if ver_paths:
-        lines.append("")
-        lines.append("Affected paths to verify:")
-        for p in ver_paths:
-            lines.append(f"- `{p}`")
-
-    lines.extend(
-        [
-            "",
-            "## Pack status",
-            "",
-            "Update the checkbox for this task in `index.md` "
-            "when complete.",
-        ]
-    )
+    lines.extend(_compile_verification_tail(unit, pack_path))
 
     return "\n".join(lines)
 
@@ -1366,8 +1930,7 @@ def _compile_incident_response_task(unit: WorkUnit) -> str:
             "present on this machine.",
             "5. Rebuild from a clean image.",
             "",
-            "Do not attempt automated remediation for these "
-            "findings.",
+            "Do not attempt automated remediation for these findings.",
         ]
     )
 
@@ -1375,6 +1938,35 @@ def _compile_incident_response_task(unit: WorkUnit) -> str:
 
 
 # ── Pack compilation ─────────────────────────────────────────────────
+
+
+def _render_index_entry(unit: WorkUnit) -> List[str]:
+    """Render a single work unit as an index checklist entry."""
+    lines: List[str] = []
+    is_ir = _is_incident_response(unit)
+    task_rel = f"tasks/{unit.id}.md"
+    wtype = "repo" if unit.work_type == "repo" else "standalone"
+    lines.append(f"- [ ] **{unit.id}** — {unit.label} ({unit.severity}, {wtype})")
+    lines.append(f"  - Task: `{task_rel}`")
+    lines.append(f"  - Working directory: `{unit.root_path}`")
+
+    categories = sorted(set(nf.category for nf in unit.findings))
+    if len(categories) == 1:
+        verify_cmd = f"uv run python clawback.py --category {categories[0]} --pretty"
+    else:
+        verify_cmd = "uv run python clawback.py --pretty"
+    lines.append(f"  - Verify: `cd {SCRIPT_DIR} && {verify_cmd}`")
+    if len(categories) > 1:
+        cats = ", ".join(categories)
+        lines.append(f"    (covers categories: {cats})")
+
+    if is_ir:
+        lines.append("  - **Human-only — no agent launcher**")
+    else:
+        launch_rel = f"launch/{unit.id}-claude.sh"
+        lines.append(f"  - Launch: `bash {launch_rel}`")
+    lines.append("")
+    return lines
 
 
 def compile_index(
@@ -1391,12 +1983,8 @@ def compile_index(
     sev_counts: Dict[str, int] = {}
     cat_counts: Dict[str, int] = {}
     for nf in findings_flat:
-        sev_counts[nf.severity] = sev_counts.get(
-            nf.severity, 0
-        ) + 1
-        cat_counts[nf.category] = cat_counts.get(
-            nf.category, 0
-        ) + 1
+        sev_counts[nf.severity] = sev_counts.get(nf.severity, 0) + 1
+        cat_counts[nf.category] = cat_counts.get(nf.category, 0) + 1
 
     repo_count = sum(1 for u in units if u.work_type == "repo")
     standalone_count = len(units) - repo_count
@@ -1423,9 +2011,7 @@ def compile_index(
     for cat in sorted(cat_counts):
         cat_parts.append(f"{cat} ({cat_counts[cat]})")
     if cat_parts:
-        lines.append(
-            f"- **Categories:** {', '.join(cat_parts)}"
-        )
+        lines.append(f"- **Categories:** {', '.join(cat_parts)}")
 
     lines.extend(
         [
@@ -1441,36 +2027,7 @@ def compile_index(
     )
 
     for unit in units:
-        is_ir = _is_incident_response(unit)
-        task_rel = f"tasks/{unit.id}.md"
-        wtype = (
-            "repo" if unit.work_type == "repo"
-            else "standalone"
-        )
-        lines.append(
-            f"- [ ] **{unit.id}** — {unit.label} "
-            f"({unit.severity}, {wtype})"
-        )
-        lines.append(f"  - Task: `{task_rel}`")
-        lines.append(
-            f"  - Working directory: `{unit.root_path}`"
-        )
-
-        lines.append(
-            "  - Verify: `clawback.py --json` "
-            "(check affected paths)"
-        )
-
-        if is_ir:
-            lines.append(
-                "  - **Human-only — no agent launcher**"
-            )
-        else:
-            launch_rel = f"launch/{unit.id}-claude.sh"
-            lines.append(
-                f"  - Launch: `bash {launch_rel}`"
-            )
-        lines.append("")
+        lines.extend(_render_index_entry(unit))
 
     return "\n".join(lines)
 
@@ -1528,7 +2085,7 @@ def compile_metadata(
             "## Staleness Warning",
             "",
             "This pack reflects the scan state at the time of "
-            "generation. A newer `clawback.py --json` scan may "
+            "generation. A newer clawback scan may "
             "find different results. Regenerate the pack after "
             "significant remediation work.",
         ]
@@ -1539,10 +2096,7 @@ def compile_metadata(
 
 def _is_incident_response(unit: WorkUnit) -> bool:
     """True when the work unit is purely incident response."""
-    return all(
-        nf.fix_type == "incident_response"
-        for nf in unit.findings
-    )
+    return all(nf.fix_type == "incident_response" for nf in unit.findings)
 
 
 def compile_claude_launcher(
@@ -1564,11 +2118,9 @@ def compile_claude_launcher(
         "",
         f'cat "{task_path}"',
         "echo ''",
-        "read -r -p 'Press Enter to start Claude Code"
-        " in plan mode...'",
+        "read -r -p 'Press Enter to start Claude Code in plan mode...'",
         "",
-        f'exec claude --permission-mode plan'
-        f' "$(cat "{task_path}")"',
+        f'exec claude --permission-mode plan "$(cat "{task_path}")"',
         "",
     ]
     return "\n".join(lines)
@@ -1587,7 +2139,7 @@ def compile_codex_launcher(
         f'cd "{unit.root_path}"',
         "",
         "echo 'Review and run (approximate Codex equivalent):'",
-        f"echo 'codex -p \"$(cat \"{task_path}\")\"'",
+        f'echo \'codex -p "$(cat "{task_path}")"\'',
         "",
     ]
     return "\n".join(lines)
@@ -1611,15 +2163,14 @@ def generate_pack(
     launch_dir.mkdir(parents=True, exist_ok=True)
 
     meta_content = compile_metadata(report_data, input_path)
-    (pack / "metadata.md").write_text(
-        meta_content + "\n", encoding="utf-8"
-    )
+    (pack / "metadata.md").write_text(meta_content + "\n", encoding="utf-8")
 
     for unit in units:
         task_filename = f"{unit.id}.md"
         task_path = tasks_dir / task_filename
         task_path.write_text(
-            compile_task_file(unit) + "\n", encoding="utf-8"
+            compile_task_file(unit, pack_path=str(pack)) + "\n",
+            encoding="utf-8",
         )
 
         # Incident-response units are human-only: no launchers.
@@ -1627,31 +2178,17 @@ def generate_pack(
             continue
 
         claude_path = launch_dir / f"{unit.id}-claude.sh"
-        claude_content = compile_claude_launcher(
-            unit, str(pack)
-        )
+        claude_content = compile_claude_launcher(unit, str(pack))
         claude_path.write_text(claude_content, encoding="utf-8")
-        claude_path.chmod(
-            claude_path.stat().st_mode
-            | stat.S_IXUSR
-            | stat.S_IXGRP
-        )
+        claude_path.chmod(claude_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
 
         codex_path = launch_dir / f"{unit.id}-codex.sh"
-        codex_content = compile_codex_launcher(
-            unit, str(pack)
-        )
+        codex_content = compile_codex_launcher(unit, str(pack))
         codex_path.write_text(codex_content, encoding="utf-8")
-        codex_path.chmod(
-            codex_path.stat().st_mode
-            | stat.S_IXUSR
-            | stat.S_IXGRP
-        )
+        codex_path.chmod(codex_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
 
     index_content = compile_index(units, report_data, str(pack))
-    (pack / "index.md").write_text(
-        index_content + "\n", encoding="utf-8"
-    )
+    (pack / "index.md").write_text(index_content + "\n", encoding="utf-8")
 
     return str(pack)
 
@@ -1666,10 +2203,7 @@ def print_preview(units: List[WorkUnit]) -> None:
     """Print inline task details for operator triage."""
     for unit in units:
         is_ir = _is_incident_response(unit)
-        wtype = (
-            "repo" if unit.work_type == "repo"
-            else "standalone"
-        )
+        wtype = "repo" if unit.work_type == "repo" else "standalone"
         sev_str = unit.severity
         if unit.severity == "critical":
             sev_str = red(unit.severity)
@@ -1686,10 +2220,7 @@ def print_preview(units: List[WorkUnit]) -> None:
         )
         if is_ir:
             print(
-                red(
-                    "  INCIDENT RESPONSE — human-only,"
-                    " no agent launcher"
-                ),
+                red("  INCIDENT RESPONSE — human-only, no agent launcher"),
                 file=sys.stderr,
             )
         for nf in unit.findings:
@@ -1710,35 +2241,31 @@ def create_tmux_session(
     Each window displays the task prompt and waits for the operator
     to press Enter before starting Claude Code in plan mode.
     """
-    launchable = [
-        u for u in units if not _is_incident_response(u)
-    ]
+    launchable = [u for u in units if not _is_incident_response(u)]
     if not launchable:
         print(
-            yellow(
-                "No launchable tasks — "
-                "skipping tmux session."
-            ),
+            yellow("No launchable tasks — skipping tmux session."),
             file=sys.stderr,
         )
         return
 
     if not check_tmux_available():
-        _fatal(
-            "tmux is not installed. "
-            "Install with: brew install tmux"
-        )
+        _fatal("tmux is not installed. Install with: brew install tmux")
 
     first = launchable[0]
     launcher = f"{pack_path}/launch/{first.id}-claude.sh"
     try:
         subprocess.run(
             [
-                "tmux", "new-session",
+                "tmux",
+                "new-session",
                 "-d",
-                "-s", session_name,
-                "-n", first.id,
-                "-c", first.root_path,
+                "-s",
+                session_name,
+                "-n",
+                first.id,
+                "-c",
+                first.root_path,
                 f'bash "{launcher}"',
             ],
             check=True,
@@ -1747,33 +2274,34 @@ def create_tmux_session(
         _fatal(f"Failed to create tmux session: {exc}")
 
     for unit in launchable[1:]:
-        launcher = (
-            f"{pack_path}/launch/{unit.id}-claude.sh"
-        )
+        launcher = f"{pack_path}/launch/{unit.id}-claude.sh"
         try:
             subprocess.run(
                 [
-                    "tmux", "new-window",
-                    "-t", session_name,
-                    "-n", unit.id,
-                    "-c", unit.root_path,
+                    "tmux",
+                    "new-window",
+                    "-t",
+                    session_name,
+                    "-n",
+                    unit.id,
+                    "-c",
+                    unit.root_path,
                     f'bash "{launcher}"',
                 ],
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
             print(
-                yellow(
-                    f"  Warning: could not create window"
-                    f" for {unit.id}: {exc}"
-                ),
+                yellow(f"  Warning: could not create window for {unit.id}: {exc}"),
                 file=sys.stderr,
             )
 
     subprocess.run(
         [
-            "tmux", "select-window",
-            "-t", f"{session_name}:0",
+            "tmux",
+            "select-window",
+            "-t",
+            f"{session_name}:0",
         ],
         check=False,
     )
@@ -1781,8 +2309,7 @@ def create_tmux_session(
     print("", file=sys.stderr)
     print(
         bold(
-            f"tmux session '{session_name}' created"
-            f" with {len(launchable)} window(s)."
+            f"tmux session '{session_name}' created with {len(launchable)} window(s)."
         ),
         file=sys.stderr,
     )
@@ -1809,10 +2336,7 @@ def create_tmux_session(
 
     print("", file=sys.stderr)
     print(
-        dim(
-            "  Each window shows the task prompt."
-            " Press Enter to start Claude."
-        ),
+        dim("  Each window shows the task prompt. Press Enter to start Claude."),
         file=sys.stderr,
     )
     print("", file=sys.stderr)
@@ -1836,17 +2360,12 @@ def print_pack_summary(
     sev_counts: Dict[str, int] = {}
     cat_counts: Dict[str, int] = {}
     for nf in findings:
-        sev_counts[nf.severity] = (
-            sev_counts.get(nf.severity, 0) + 1
-        )
-        cat_counts[nf.category] = (
-            cat_counts.get(nf.category, 0) + 1
-        )
+        sev_counts[nf.severity] = sev_counts.get(nf.severity, 0) + 1
+        cat_counts[nf.category] = cat_counts.get(nf.category, 0) + 1
 
     total = len(findings)
     print(
-        f"  {total} finding(s) across "
-        f"{len(cat_counts)} category(ies)",
+        f"  {total} finding(s) across {len(cat_counts)} category(ies)",
         file=sys.stderr,
     )
 
@@ -1885,10 +2404,7 @@ def print_pack_summary(
     print("", file=sys.stderr)
 
     for unit in units:
-        wtype = (
-            "repo" if unit.work_type == "repo"
-            else "standalone"
-        )
+        wtype = "repo" if unit.work_type == "repo" else "standalone"
         suffix = ""
         if _is_incident_response(unit):
             suffix = "  [HUMAN-ONLY]"
@@ -1897,9 +2413,7 @@ def print_pack_summary(
             file=sys.stderr,
         )
 
-    launchable = [
-        u for u in units if not _is_incident_response(u)
-    ]
+    launchable = [u for u in units if not _is_incident_response(u)]
     if launchable:
         print("", file=sys.stderr)
         print(
@@ -1908,10 +2422,7 @@ def print_pack_summary(
         )
         for unit in launchable:
             print(
-                dim(
-                    f"    bash {pack_path}/launch/"
-                    f"{unit.id}-claude.sh"
-                ),
+                dim(f"    bash {pack_path}/launch/{unit.id}-claude.sh"),
                 file=sys.stderr,
             )
     print("", file=sys.stderr)
@@ -1991,16 +2502,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Enrich
     op_available = not args.dry_run and check_op_available()
     op_authenticated = op_available and check_op_authenticated()
-    enrich_work_units(
-        units, vault=args.vault, dry_run=args.dry_run
-    )
+    enrich_work_units(units, vault=args.vault, dry_run=args.dry_run)
 
     # Combined mode: legacy stdout output
     if args.combined:
         if args.preview or args.tmux:
             print(
-                "Warning: --combined ignores"
-                " --preview and --tmux.",
+                "Warning: --combined ignores --preview and --tmux.",
                 file=sys.stderr,
             )
         write_combined(units)
@@ -2008,22 +2516,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Pack generation (default)
     output_dir = args.output_dir or default_pack_dir()
-    pack_path = generate_pack(
-        units, data, output_dir, input_path=args.input
-    )
+    pack_path = generate_pack(units, data, output_dir, input_path=args.input)
 
     # Summary
-    print_pack_summary(
-        pack_path, units, findings, op_available, op_authenticated
-    )
+    print_pack_summary(pack_path, units, findings, op_available, op_authenticated)
 
     if args.preview:
         print_preview(units)
 
     if args.tmux:
-        session_name = (
-            f"restitution-{pathlib.Path(pack_path).name}"
-        )
+        session_name = f"restitution-{pathlib.Path(pack_path).name}"
         create_tmux_session(units, pack_path, session_name)
 
     return 0
