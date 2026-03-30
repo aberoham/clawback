@@ -765,7 +765,7 @@ class TestTaskFile:
     def test_verification_uses_correct_command(self):
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         md = compile_task_file(unit)
-        assert "uv run python clawback.py" in md
+        assert "python3 clawback.py" in md
         assert "--pretty" in md
         assert "--json" not in md
         assert "--scan-path" not in md
