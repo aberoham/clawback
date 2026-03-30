@@ -907,7 +907,7 @@ class TestPackCompilation:
         md = compile_index([unit], report, "/tmp/pack")
         assert "--scan-path" not in md
         assert "--json" not in md
-        assert "uv run python clawback.py --pretty" in md
+        assert "--category env_files --pretty" in md
 
     def test_index_ir_unit_has_no_launcher(self):
         unit = _make_work_unit(

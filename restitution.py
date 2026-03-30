@@ -727,8 +727,38 @@ OP_SSH_AGENT_SOCK = os.path.expanduser(
 
 
 def _detect_op_ssh_agent() -> bool:
-    """Check if 1Password SSH agent socket exists on disk."""
-    return os.path.exists(OP_SSH_AGENT_SOCK)
+    """Check if 1Password SSH agent is configured and live.
+
+    Requires both a live socket (not just a stale file) and an
+    IdentityAgent directive in ~/.ssh/config pointing to it.
+    A socket that exists but is not connectable indicates 1Password
+    is installed but not running.
+    """
+    if not os.path.exists(OP_SSH_AGENT_SOCK):
+        return False
+
+    # Verify the socket is live, not stale.
+    import socket as _socket
+
+    try:
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.settimeout(1)
+        sock.connect(OP_SSH_AGENT_SOCK)
+        sock.close()
+    except (OSError, _socket.timeout):
+        return False
+
+    # Verify ~/.ssh/config routes through the 1Password agent.
+    ssh_config = os.path.expanduser("~/.ssh/config")
+    try:
+        with open(ssh_config, encoding="utf-8") as f:
+            content = f.read()
+        if "2BUA8C4S2C.com.1password" not in content:
+            return False
+    except OSError:
+        return False
+
+    return True
 
 
 def _gather_environment_lines(
@@ -1611,8 +1641,9 @@ def _section_kubeconfig_migrate(
     else:
         lines.append(
             "   Edit `{path}` directly: remove `user:` "
-            "entries that contain `client-certificate-data` "
-            "or `client-key-data` fields.".format(path=path)
+            "entries that contain `client-certificate-data`, "
+            "`client-key-data`, `token:`, or `password:` "
+            "fields.".format(path=path)
         )
 
     lines.extend(
@@ -2047,9 +2078,22 @@ def compile_index(
             f"  - Working directory: `{unit.root_path}`"
         )
 
+        categories = sorted(
+            set(nf.category for nf in unit.findings)
+        )
+        if len(categories) == 1:
+            verify_cmd = (
+                f"uv run python clawback.py "
+                f"--category {categories[0]} --pretty"
+            )
+        else:
+            cats = ", ".join(categories)
+            verify_cmd = (
+                f"uv run python clawback.py --pretty "
+                f"# categories: {cats}"
+            )
         lines.append(
-            f"  - Verify: `cd {SCRIPT_DIR} && "
-            "uv run python clawback.py --pretty`"
+            f"  - Verify: `cd {SCRIPT_DIR} && {verify_cmd}`"
         )
 
         if is_ir:
