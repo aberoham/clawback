@@ -128,6 +128,48 @@ For early rollout, the sensible approach is:
 3. use audit or training mode to refine heuristics where needed
 4. only then widen deployment through JAMF
 
+## Restitution
+
+`restitution.py` is the companion remediation tool. It consumes clawback JSON output and generates a **remediation pack**: an ordered set of agent-ready markdown tasks, an operator-facing index, and reviewable launcher scripts.
+
+### Quick start
+
+```bash
+python3 clawback.py --json > scan.json
+python3 restitution.py -i scan.json
+```
+
+This creates a timestamped pack under `./tmp/restitution-packs/<timestamp>/` containing:
+
+- `index.md` — operator dashboard with execution checklist
+- `metadata.md` — scan provenance and staleness warning
+- `tasks/*.md` — one self-contained agent prompt per work unit
+- `launch/*.sh` — reviewable Claude Code and Codex launcher scripts
+
+### Workflow
+
+1. Run `clawback.py --json` to scan
+2. Run `restitution.py -i scan.json` to generate a pack
+3. Open `index.md` and work through the queue in order
+4. Feed each task file to Claude Code or another coding agent
+5. Mark progress via checkboxes in `index.md`
+6. Re-scan and regenerate after remediation to confirm findings are resolved
+
+### Options
+
+| Flag | Purpose |
+|------|---------|
+| `--input, -i` | Path to clawback JSON (default: stdin) |
+| `--output-dir` | Explicit pack destination |
+| `--vault` | Restrict 1Password enrichment to one vault |
+| `--category` | Process only one finding category |
+| `--dry-run` | Skip 1Password queries |
+| `--combined` | Emit combined markdown to stdout (legacy) |
+
+### Grouping
+
+Findings are grouped into work units by the logical area where edits happen: one task per repository, one task per standalone config area (`.ssh/`, `.kube/`, `.config/gcloud/`, shell profiles, etc.). `teampcp_ioc` findings produce human-only incident response checklists with no agent launchers.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
