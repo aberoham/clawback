@@ -1806,12 +1806,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             ctx, args.pretty, args.training, args.category,
         )
         _emit(output, args.output_file)
-        print(
-            jamf_ea_line(
-                {"critical": 0, "high": 0, "medium": 0, "low": 0}, 0,
-            ),
-            file=sys.stderr,
-        )
         return code
 
     if not args.quiet:

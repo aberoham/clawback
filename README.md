@@ -1,68 +1,45 @@
 # clawback
 
+Clawback finds your easily exposed secrets and helps you pay the restitution with your favorite fount' of tokens.
+
 ## Quick start
 
 ```bash
-# Scan this machine
+# Scan your machine
 curl -fsSL https://raw.githubusercontent.com/aberoham/clawback/main/clawback.py | python3 - --pretty
 ```
 
-Or clone and remediate:
+Or _really_ dig in:
 
 ```bash
 git clone https://github.com/aberoham/clawback.git && cd clawback
-
-# Scan
 python3 clawback.py --quiet --output-file tmp/scan.json
-
-# See what needs fixing
 python3 restitution.py -i tmp/scan.json --preview --dry-run
 
-# Launch remediation sessions (requires tmux + Claude Code)
+# Launch a restitution remediation sessions (requires tmux + Claude Code)
 python3 restitution.py -i tmp/scan.json --tmux
 tmux attach -t restitution-<timestamp>
 ```
 
-## What is this
+## What the heck, why
 
-`clawback` is a small macOS secret exposure scanner written as a single Python file.
+`clawback` is a small macOS exposure scanner written as a single Python file, designed to quickly answer the question, "what static credentials or keys are sitting unencrypted and exposed on my workstation(s) right now?" `clawback` was inspired by prompt injection malware that goes after cloud credentials, SSH keys, Git credential stores, package manager auth, kubeconfigs, `.env` files, shell-profile secrets, wallet files, and other juicy bits often left laying around on vibe coder's laptops.
 
-It exists for a very specific reason: most secret scanners are built to search source code for hardcoded secrets. That is useful, but it is not the same problem as asking, "what static credentials and credential files are sitting on a developer workstation right now, ready for the next supply chain compromise to steal?"
-
-`clawback` is aimed at that second problem.
-
-It was shaped around the kinds of material TeamPCP / CanisterWorm-style malware actually goes after on macOS developer machines: cloud credentials, SSH keys, Git credential stores, package manager auth, kubeconfigs, `.env` files, shell-profile secrets, wallet files, and a few campaign-specific indicators of compromise.
-
-The design constraints were simple:
-
-- one file
-- Python stdlib only
-- read-only
-- fast enough to run from JAMF or CrowdStrike RTR
-- never print raw secret values in normal scan mode
+The design constraints are simple: one file using Python 3.x stdlib as shipped within Xcode command-line tools, fast enough to run from fleet management tools (JAMF, Crowdstrike RTR, Intune, etc), read-only and easy to improve.
 
 ## What It Does
 
-In normal scan mode, `clawback` reports actionable findings and separates them from informational observations.
+In normal scan mode, `clawback` reports actionable findings and separates them from informational observations. Findings are things that likely represent real exposure: plaintext credentials, embedded k8s secrets, unencrypted SSH keys, static cloud credentials, secret-bearing `.env` files, etc. Observations are useful posture signals that aren't findings by themselves but help understand the state of a machine. Examples of posture signals include, is `op` (1Password CLI) installed, is Git using `osxkeychain`, is Docker using a credential store, does kubeconfig point to external auth, etc.
 
-Findings are things that likely represent real exposure: plaintext credentials, embedded kube secrets, unencrypted SSH keys, static cloud credentials, secret-bearing `.env` files, and similar material.
+The JAMF extension attribute ("EA") line only summarizes findings, not observations.
 
-Observations are posture signals that are still useful to know about but should not make a machine fail a compliance check by themselves. Examples include:
+## Audit and Train Modes
 
-- `op` is installed
-- Git is using `osxkeychain`
-- Docker is using a credential store
-- a kubeconfig uses external auth
-
-The JAMF extension attribute line only summarizes findings, not observations.
-
-## Operating Modes
-
-`clawback` has three practical modes.
+Audit mode is for heuristic tuning, where `clawback` emits metadata about found variables without bothering with classification. Training mode is audit mode extended with anonymized output, useful for "autoresearch" style aggregation and classifier refinement. We aim to have zero false positives and no false negatives -- the noise must be squelched!
 
 ### 1. Scan mode
 
-This is the default. It is meant for compliance measurement.
+just tell me how exposed I am
 
 ```bash
 python3 clawback.py --pretty
@@ -76,22 +53,15 @@ Or quietly for JAMF:
 
 ### 2. Audit mode
 
-Audit mode is for heuristic tuning. It walks shell profiles and `.env` files and emits metadata about variables without turning that output into scan findings.
+walk shell profiles and `.env` files, then emit metadata
 
 ```bash
 python3 clawback.py --audit-env --pretty
 ```
 
-You can scope it:
-
-```bash
-python3 clawback.py --audit-env --category shell_profiles
-python3 clawback.py --audit-env --category env_files
-```
-
 ### 3. Training mode
 
-Training mode is audit mode with anonymized output for aggregation and classifier refinement. It automatically implies `--audit-env`.
+audit but also dump a bunch of data for classifier training
 
 ```bash
 python3 clawback.py --training --output-file /tmp/clawback-training.json
@@ -113,32 +83,23 @@ The JSON report includes:
 - total findings
 - scan errors
 
-Audit and training mode emit audit records instead of the normal scan report, plus a zeroed JAMF EA line.
+Audit and training mode emit audit records instead of the normal scan report.
 
 ## A Note on 1Password References
 
 `clawback` intentionally treats `op://...` values as non-secret references, not as exposed secrets.
 
-That means patterns like:
-
-```bash
-AWS_ACCESS_KEY_ID="op://development/aws/Access Keys/access_key_id"
-AWS_SECRET_ACCESS_KEY="op://development/aws/Access Keys/secret_access_key"
-```
-
-are understood as runtime references for `op run`, not as leaked credentials.
+That means patterns like `AWS_ACCESS_KEY_ID="op://development/aws/Access Keys/access_key_id"` or 
+`AWS_SECRET_ACCESS_KEY="op://development/aws/Access Keys/secret_access_key"` are understood 
+as runtime references for `op run`, not as leaked credentials.
 
 ## What It Does Not Do
 
-Right now `clawback` is a detector, not a validator.
-
-If it finds a path to a credential file or a likely static secret, it reports the exposure. It does not yet try to prove whether the credential is still live, revoked, expired, or unusable. That may come later, but the current tool is intentionally conservative and read-only.
+`clawback` is a detector, not a validator, that simply reports potential exposure. `clawback` does not try to prove whether the credential is still live, revoked, expired, or unusable. The goal is to make you aware and give your agent a strong headstart around how best to remediate that exposure.
 
 ## Deployment Notes
 
-The script was designed around macOS systems where Python 3 is available via Xcode Command Line Tools.
-
-For CrowdStrike RTR, a typical flow looks like:
+The script was designed around macOS systems where Python 3 is available via Xcode Command Line Tools.  For usage via CrowdStrike realtime response (Crowdstrike RTR), a typical flow looks like:
 
 ```bash
 put clawback.py
@@ -146,52 +107,33 @@ runscript -Raw="python3 /tmp/clawback.py --quiet --output-file /tmp/clawback.jso
 get /tmp/clawback.json
 ```
 
-For early rollout, the sensible approach is:
+A sensible approach for fleet-wide rollout would be:
 
 1. use normal scan mode for a small set of manual runs
-2. use RTR to inspect the JSON output on real machines
-3. use audit or training mode to refine heuristics where needed
-4. only then widen deployment through JAMF
+2. use Crowdstrike RTR to inspect the JSON output on real machines, looking especially for false positives or false negatives
+3. use audit or training mode to refine heuristics, contribute those back upstream to this project
+4. only then widen deployment fleet-wide through JAMF, Intune, etc
 
 ## Restitution
 
-`restitution.py` is the companion remediation tool. It consumes clawback JSON output and generates a **remediation pack**: an ordered set of agent-ready markdown tasks, an operator-facing index, and reviewable launcher scripts.
+`restitution.py` is the companion remediation tool that consumes clawback JSON output and generates a **remediation pack** which isn't much more than an ordered set of agent-ready markdown tasks ready for your coding agent.
 
 ### Workflow
 
 ```bash
-# 1. Scan
-python3 clawback.py --quiet --output-file scan.json
-
-# 2. Triage — review what needs fixing
-python3 restitution.py -i scan.json --preview --dry-run
+# Scan and review 
+python3 clawback.py --quiet --output-file tmp/scan.json
+python3 restitution.py -i tmp/scan.json --preview --dry-run
 
 # 3. Remediate — launch Claude Code sessions in tmux
-python3 restitution.py -i scan.json --tmux
+python3 restitution.py -i tmp/scan.json --tmux
 tmux attach -t restitution-<timestamp>
 
+# Note: Each tmux window shows the task prompt and waits for you to press Enter before starting Claude Code in plan mode. Cycle windows with `Ctrl-b n`.
+
 # 4. Re-scan to confirm findings are resolved
-python3 clawback.py --quiet --output-file scan2.json
+python3 clawback.py --quiet --output-file tmp/scan2.json
 ```
-
-Each tmux window shows the task prompt and waits for you to press Enter before starting Claude Code in plan mode. Cycle windows with `Ctrl-b n`.
-
-### Options
-
-| Flag | Purpose |
-|------|---------|
-| `--input, -i` | Path to clawback JSON (default: stdin) |
-| `--output-dir` | Explicit pack destination |
-| `--vault` | Restrict 1Password enrichment to one vault |
-| `--category` | Process only one finding category |
-| `--dry-run` | Skip 1Password queries |
-| `--preview` | Print task details inline for triage |
-| `--tmux` | Create a tmux session with one window per task |
-| `--combined` | Emit combined markdown to stdout (legacy) |
-
-### Grouping
-
-Findings are grouped into work units by the logical area where edits happen: one task per repository, one task per standalone config area (`.ssh/`, `.kube/`, `.config/gcloud/`, shell profiles, etc.). `teampcp_ioc` findings produce human-only incident response checklists with no agent launchers.
 
 ## License
 

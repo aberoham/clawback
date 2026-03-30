@@ -24,6 +24,10 @@ Clawback tells you **what is exposed**. This library tells you **how to fix it**
 3. Pick a [tier](concepts/tier-definitions.md) appropriate to your situation.
 4. Follow the commands. Verify with clawback.
 
+## Architecture
+
+- [Architecture diagrams](architecture.md) -- scanning and restitution flows
+
 ## Concepts
 
 Start here if you are a security engineer building a remediation program.
@@ -35,6 +39,7 @@ Start here if you are a security engineer building a remediation program.
 - [CI/CD implications](concepts/cicd-matrix.md) -- what breaks in pipelines when you remove local keys
 - [1Password CLI](concepts/1password-cli.md) -- assessment as a universal Tier 2 solution
 - [macOS Keychain](concepts/macos-keychain.md) -- assessment as a free, built-in Tier 2
+- [Roadmap](ROADMAP.md) -- proposed future scanner categories, paths, and severity model
 
 ## Remediation guides
 
