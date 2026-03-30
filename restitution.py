@@ -1739,7 +1739,7 @@ def create_tmux_session(
                 "-s", session_name,
                 "-n", first.id,
                 "-c", first.root_path,
-                f"bash {launcher}",
+                f'bash "{launcher}"',
             ],
             check=True,
         )
@@ -1757,7 +1757,7 @@ def create_tmux_session(
                     "-t", session_name,
                     "-n", unit.id,
                     "-c", unit.root_path,
-                    f"bash {launcher}",
+                    f'bash "{launcher}"',
                 ],
                 check=True,
             )
@@ -1997,6 +1997,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Combined mode: legacy stdout output
     if args.combined:
+        if args.preview or args.tmux:
+            print(
+                "Warning: --combined ignores"
+                " --preview and --tmux.",
+                file=sys.stderr,
+            )
         write_combined(units)
         return 0
 

@@ -1272,3 +1272,48 @@ class TestTmux:
 
         err = capsys.readouterr().err
         assert "switch-client" in err
+
+    def test_launcher_path_quoted_for_spaces(self, tmp_path):
+        """Paths with spaces must be quoted in the tmux command."""
+        unit = _make_work_unit(
+            [_env_finding("/project/.env", ["K"])],
+        )
+        pack = tmp_path / "pack with spaces"
+        launch_dir = pack / "launch"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "001-high-test-claude.sh").write_text(
+            "#!/usr/bin/env bash\n"
+        )
+
+        with patch("restitution.subprocess.run") as mock_run, \
+             patch(
+                 "restitution.check_tmux_available",
+                 return_value=True,
+             ):
+            create_tmux_session(
+                [unit], str(pack), "test-session"
+            )
+
+        cmd = mock_run.call_args_list[0].args[0]
+        shell_arg = cmd[-1]
+        assert '"' in shell_arg
+
+    def test_combined_warns_on_preview_tmux(
+        self, tmp_path, capsys
+    ):
+        """--combined should warn when --preview or --tmux are also
+        passed rather than silently ignoring them."""
+        report = _minimal_report(
+            [_env_finding("/project/.env", ["K"])]
+        )
+        p = tmp_path / "scan.json"
+        p.write_text(json.dumps(report))
+        rc = main([
+            "--input", str(p),
+            "--dry-run",
+            "--combined",
+            "--preview",
+        ])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "--combined ignores" in err
