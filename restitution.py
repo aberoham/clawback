@@ -767,7 +767,7 @@ def _gather_environment_lines(
     ]
 
     lines.append(
-        f"- **Scanner:** `{SCRIPT_DIR}/clawback.py` (run with `uv run python`)"
+        f"- **Scanner:** `{SCRIPT_DIR}/clawback.py`"
     )
 
     categories = sorted(set(nf.category for nf in unit.findings))
@@ -1805,9 +1805,9 @@ def _compile_verification_tail(
     lines.append("```bash")
     lines.append(f"cd {SCRIPT_DIR}")
     if len(categories) == 1:
-        lines.append(f"uv run python clawback.py --category {categories[0]} --pretty")
+        lines.append(f"python3 clawback.py --category {categories[0]} --pretty")
     else:
-        lines.append("uv run python clawback.py --pretty")
+        lines.append("python3 clawback.py --pretty")
     lines.append("```")
     if ver_paths:
         lines.append("")
@@ -1952,9 +1952,9 @@ def _render_index_entry(unit: WorkUnit) -> List[str]:
 
     categories = sorted(set(nf.category for nf in unit.findings))
     if len(categories) == 1:
-        verify_cmd = f"uv run python clawback.py --category {categories[0]} --pretty"
+        verify_cmd = f"python3 clawback.py --category {categories[0]} --pretty"
     else:
-        verify_cmd = "uv run python clawback.py --pretty"
+        verify_cmd = "python3 clawback.py --pretty"
     lines.append(f"  - Verify: `cd {SCRIPT_DIR} && {verify_cmd}`")
     if len(categories) > 1:
         cats = ", ".join(categories)
