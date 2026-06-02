@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import pathlib
 
+import rattlesnake
 import clawback
-from clawback import main, parse_args
+from rattlesnake import main, parse_args
 
 
 # -------------------------------------------------------------------
@@ -14,6 +15,9 @@ from clawback import main, parse_args
 
 
 class TestParseArgs:
+    def test_legacy_module_exports_main(self):
+        assert clawback.main is main
+
     def test_defaults(self):
         args = parse_args([])
         assert args.pretty is False
@@ -57,7 +61,7 @@ class TestMainIntegration:
         """Common patches: redirect home, suppress subprocesses."""
         monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: tmp_path))
         monkeypatch.setattr(
-            clawback, "run_cmd", lambda *a, **kw: None
+            rattlesnake, "run_cmd", lambda *a, **kw: None
         )
 
     def test_clean_home_exit_0(self, tmp_path, monkeypatch, clean_env):
@@ -82,7 +86,7 @@ class TestMainIntegration:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(
-            clawback, "ALL_SCANS", [("boom", exploding_scan)]
+            rattlesnake, "ALL_SCANS", [("boom", exploding_scan)]
         )
         code = main(["--quiet"])
         assert code == 2

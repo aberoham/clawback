@@ -4,8 +4,8 @@ parent: Remediation Guides
 nav_order: 2
 description: >-
   Remediate GCP service account key files and ADC configurations found by
-  clawback in ~/.config/gcloud/ and GOOGLE_APPLICATION_CREDENTIALS.
-clawback_category: cloud_credentials
+  rattlesnake in ~/.config/gcloud/ and GOOGLE_APPLICATION_CREDENTIALS.
+rattlesnake_category: cloud_credentials
 ---
 
 # GCP application default credentials
@@ -22,7 +22,7 @@ GCP Application Default Credentials (ADC) provide a uniform way for Google Cloud
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -128,7 +128,7 @@ find ~ -name "*.json" -exec grep -l '"type": "service_account"' {} \; 2>/dev/nul
 # Check GOOGLE_APPLICATION_CREDENTIALS
 echo "$GOOGLE_APPLICATION_CREDENTIALS"  # should be empty or point to a WIF config
 
-python3 clawback.py --category cloud_credentials --pretty
+python3 rattlesnake.py --category cloud_credentials --pretty
 ```
 
 ## Common mistakes

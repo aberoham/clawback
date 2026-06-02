@@ -18,7 +18,7 @@ nav_order: 1
 
 ## The target state
 
-A macOS developer workstation is fully remediated when clawback returns **zero findings** -- no long-lived, reusable secrets in plaintext on disk. The ideal output is a set of *observations* confirming compliant configurations (SSO profiles, credential helpers, exec plugins) without exposing secret values.
+A macOS developer workstation is fully remediated when rattlesnake returns **zero findings** -- no long-lived, reusable secrets in plaintext on disk. The ideal output is a set of *observations* confirming compliant configurations (SSO profiles, credential helpers, exec plugins) without exposing secret values.
 
 "Fully remediated" does not mean "zero secrets anywhere." It means **zero long-lived, reusable plaintext secrets on disk** -- in config files, dotfiles, environment variables, or shell profiles.
 
@@ -46,9 +46,9 @@ Dotfiles and `.env` files contain vault URIs (e.g., `op://vault/item/field`) or 
 
 SSH and cryptographic keys are either stored in hardware enclaves (YubiKey, Secure Enclave) or managed dynamically by biometric-gated agents (1Password SSH agent), ensuring the private key never touches the filesystem.
 
-## What clawback should report
+## What rattlesnake should report
 
-After full remediation, a clawback scan should produce:
+After full remediation, a rattlesnake scan should produce:
 
 - **Zero findings** across all categories
 - **Observations** confirming compliant configurations, such as:

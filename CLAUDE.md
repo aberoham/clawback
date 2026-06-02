@@ -9,19 +9,19 @@ uv run pytest tests/ -q                          # run all tests
 uv run pytest tests/test_classify_value.py -q     # run one test file
 uv run pytest tests/test_cli.py::TestMainIntegration::test_clean_home_exit_0 -v  # run one test
 
-uv run python clawback.py --pretty                          # scan (human-readable)
-uv run python clawback.py --quiet --output-file scan.json   # scan (JSON for restitution)
-uv run python clawback.py --audit-env --pretty              # audit mode (heuristic tuning)
+uv run python rattlesnake.py --pretty                          # scan (human-readable)
+uv run python rattlesnake.py --quiet --output-file scan.json   # scan (JSON for antivenom)
+uv run python rattlesnake.py --audit-env --pretty              # audit mode (heuristic tuning)
 
-uv run python restitution.py -i scan.json --preview --dry-run  # triage findings
-uv run python restitution.py -i scan.json --tmux               # launch tmux sessions
+uv run python antivenom.py -i scan.json --preview --dry-run  # triage findings
+uv run python antivenom.py -i scan.json --tmux               # launch tmux sessions
 ```
 
 CI runs `uv run pytest tests/ -q` across macOS + Ubuntu on Python 3.9, 3.12, 3.13.
 
 ## Architecture
 
-Single-file macOS secret exposure scanner (`clawback.py`, stdlib-only, read-only) with a companion remediation pack generator (`restitution.py`). Designed for JAMF and CrowdStrike RTR deployment.
+Single-file macOS secret exposure scanner (`rattlesnake.py`, stdlib-only, read-only) with a companion remediation pack generator (`antivenom.py`). Designed for JAMF and CrowdStrike RTR deployment.
 
 ### Core data flow
 
@@ -46,9 +46,9 @@ When `classify_value` returns `"benign"` but the variable *name* matches `NAMED_
 
 teampcp_iocs, cloud_credentials, ssh_keys, git_credentials, package_manager_tokens, kubernetes, shell_profiles, environment_variables, env_files, crypto_wallets, secrets_manager_status. The `--category` flag restricts to one.
 
-### Restitution
+### Antivenom
 
-`restitution.py` consumes clawback JSON output and generates a remediation pack: `index.md` (operator checklist), `metadata.md` (provenance), `tasks/*.md` (agent-ready prompts), `launch/*.sh` (Claude Code/Codex launchers). Findings are grouped into `WorkUnit` objects by project root or standalone config area. `teampcp_ioc` findings produce human-only incident response checklists with no agent launchers.
+`antivenom.py` consumes rattlesnake JSON output and generates a remediation pack: `index.md` (operator checklist), `metadata.md` (provenance), `tasks/*.md` (agent-ready prompts), `launch/*.sh` (Claude Code/Codex launchers). Findings are grouped into `WorkUnit` objects by project root or standalone config area. `teampcp_ioc` findings produce human-only incident response checklists with no agent launchers.
 
 `--preview` prints inline task details to stderr for triage. `--tmux` creates a detached tmux session with one named window per launchable task; each window displays the task prompt and waits for Enter before starting `claude --permission-mode plan`.
 

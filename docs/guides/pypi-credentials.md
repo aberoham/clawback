@@ -3,8 +3,8 @@ title: PyPI Credentials
 parent: Remediation Guides
 nav_order: 7
 description: >-
-  Remediate PyPI passwords and tokens found by clawback in ~/.pypirc.
-clawback_category: package_manager_tokens
+  Remediate PyPI passwords and tokens found by rattlesnake in ~/.pypirc.
+rattlesnake_category: package_manager_tokens
 ---
 
 # PyPI credentials
@@ -21,7 +21,7 @@ PyPI credentials in `~/.pypirc` grant publishing access to Python packages. A st
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -96,7 +96,7 @@ grep -n "password" ~/.pypirc 2>/dev/null  # should find nothing
 # Verify keyring is working
 python3 -c "import keyring; print(keyring.get_keyring())"
 
-python3 clawback.py --category package_manager_tokens --pretty
+python3 rattlesnake.py --category package_manager_tokens --pretty
 ```
 
 ## Common mistakes

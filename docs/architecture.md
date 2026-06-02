@@ -1,10 +1,10 @@
-# Clawback Architecture
+# Rattlesnake Architecture
 
-## Scanning Flow (`clawback.py`)
+## Scanning Flow (`rattlesnake.py`)
 
 ```mermaid
 flowchart TD
-    CLI["CLI Entry<br/><code>clawback.py</code>"] --> ParseArgs["Parse Arguments<br/>--pretty, --quiet, --category,<br/>--audit-env, --output-file"]
+    CLI["CLI Entry<br/><code>rattlesnake.py</code>"] --> ParseArgs["Parse Arguments<br/>--pretty, --quiet, --category,<br/>--audit-env, --output-file"]
     ParseArgs --> InitCtx["Initialize ScanContext<br/>hostname, username, home,<br/>findings=[], observations=[]"]
 
     InitCtx --> AuditCheck{--audit-env?}
@@ -40,11 +40,11 @@ flowchart TD
     style Exit2 fill:#fc8181,color:#fff
 ```
 
-## Restitution Flow (`restitution.py`)
+## Antivenom Flow (`antivenom.py`)
 
 ```mermaid
 flowchart TD
-    CLI["CLI Entry<br/><code>restitution.py -i scan.json</code>"] --> Ingest["Load, validate, and normalize<br/>clawback JSON into NormalizedFindings"]
+    CLI["CLI Entry<br/><code>antivenom.py -i scan.json</code>"] --> Ingest["Load, validate, and normalize<br/>rattlesnake JSON into NormalizedFindings"]
     Ingest --> Group["Group into WorkUnits<br/>by repo root, ~/.ssh, ~/.kube,<br/>shell profiles, runtime env"]
     Group --> Enrich["enrich_work_units()"]
 

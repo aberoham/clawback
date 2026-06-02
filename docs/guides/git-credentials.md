@@ -3,9 +3,9 @@ title: Git Credentials
 parent: Remediation Guides
 nav_order: 5
 description: >-
-  Remediate plaintext Git credentials and .netrc passwords found by clawback
+  Remediate plaintext Git credentials and .netrc passwords found by rattlesnake
   in ~/.git-credentials, ~/.netrc, and gitconfig.
-clawback_category: git_credentials
+rattlesnake_category: git_credentials
 ---
 
 # Git credentials
@@ -22,7 +22,7 @@ Git's `credential.helper = store` saves passwords in plaintext at `~/.git-creden
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -128,7 +128,7 @@ ls -la ~/.git-credentials 2>/dev/null      # should not exist
 ls -la ~/.config/git/credentials 2>/dev/null  # should not exist
 ls -la ~/.netrc 2>/dev/null                # should not exist (or have no passwords)
 
-python3 clawback.py --category git_credentials --pretty
+python3 rattlesnake.py --category git_credentials --pretty
 ```
 
 ## Common mistakes

@@ -4,9 +4,9 @@ layout: default
 nav_order: 99
 ---
 
-# Clawback Roadmap
+# Rattlesnake Roadmap
 
-This roadmap would expand `clawback` from a static-secret scanner into a broader **developer workstation exposure scanner** while preserving the current design constraints:
+This roadmap would expand `rattlesnake` from a static-secret scanner into a broader **developer workstation exposure scanner** while preserving the current design constraints:
 
 - single-file Python
 - stdlib only
@@ -35,7 +35,7 @@ Use one severity model across all new categories.
 
 - Escalate to `critical` when the artifact is both present and plausibly live.
 - Downgrade to `low` when the artifact is present but clearly expired, revoked, or only useful as historical data.
-- Prefer `high` over `critical` when clawback can prove presence but not liveness.
+- Prefer `high` over `critical` when rattlesnake can prove presence but not liveness.
 - Use `info` for posture checks that should not fail compliance by themselves.
 
 ---
@@ -310,7 +310,7 @@ Model secure stores as in-scope post-compromise targets without treating them as
 
 ### Exit criteria
 
-- Collaboration and mail coverage exists without turning clawback into a general DLP tool
+- Collaboration and mail coverage exists without turning rattlesnake into a general DLP tool
 - Signing-key coverage is explicit enough to support maintainer-risk assessments
 - Secure-store posture is modeled as a risk modifier, not a plaintext-secret detector
 

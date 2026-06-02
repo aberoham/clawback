@@ -11,7 +11,7 @@ exclude-newer = "2026-03-22T11:23:42.190951Z"
 exclude-newer-span = "P7D"
 
 [[package]]
-name = "clawback"
+name = "rattlesnake"
 version = "1.0.0"
 source = { virtual = "." }
 

@@ -3,9 +3,9 @@ title: Cargo / crates.io Tokens
 parent: Remediation Guides
 nav_order: 10
 description: >-
-  Remediate crates.io tokens found by clawback in
+  Remediate crates.io tokens found by rattlesnake in
   ~/.cargo/credentials.toml.
-clawback_category: package_manager_tokens
+rattlesnake_category: package_manager_tokens
 ---
 
 # Cargo / crates.io tokens
@@ -22,7 +22,7 @@ Cargo stores crates.io authentication tokens in `~/.cargo/credentials.toml` in p
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -110,7 +110,7 @@ ls -la ~/.cargo/credentials.toml  # should not exist
 # Verify credential provider configuration
 grep "global-credential-providers" ~/.cargo/config.toml
 
-python3 clawback.py --category package_manager_tokens --pretty
+python3 rattlesnake.py --category package_manager_tokens --pretty
 ```
 
 ## Common mistakes

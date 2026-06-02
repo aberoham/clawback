@@ -3,8 +3,8 @@ title: Unencrypted SSH Private Keys
 parent: Remediation Guides
 nav_order: 4
 description: >-
-  Remediate unencrypted SSH private keys found by clawback in ~/.ssh/.
-clawback_category: ssh_keys
+  Remediate unencrypted SSH private keys found by rattlesnake in ~/.ssh/.
+rattlesnake_category: ssh_keys
 ---
 
 # Unencrypted SSH private keys
@@ -21,7 +21,7 @@ Unencrypted SSH private keys on disk are immediately usable by any process with 
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -156,7 +156,7 @@ ssh-add -l
 # Verify 1Password agent is configured
 grep -r "IdentityAgent" ~/.ssh/config
 
-python3 clawback.py --category ssh_keys --pretty
+python3 rattlesnake.py --category ssh_keys --pretty
 ```
 
 ## Common mistakes

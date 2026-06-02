@@ -3,9 +3,9 @@ title: Shell Profile and .env File Secrets
 parent: Remediation Guides
 nav_order: 12
 description: >-
-  Remediate hardcoded API keys and secrets found by clawback in shell
+  Remediate hardcoded API keys and secrets found by rattlesnake in shell
   profiles (~/.zshrc) and .env files.
-clawback_category: shell_profiles
+rattlesnake_category: shell_profiles
 ---
 
 # Shell profile and .env file secrets
@@ -13,7 +13,7 @@ clawback_category: shell_profiles
 
 Hardcoded secrets in shell profiles (`~/.zshrc`, `~/.bashrc`) and `.env` files are the most common form of credential exposure on developer workstations. Every child process inherits these values, and any malware with file read access can harvest them.
 
-This guide covers three clawback categories: `shell_profiles`, `environment_variables`, and `env_files`.
+This guide covers three rattlesnake categories: `shell_profiles`, `environment_variables`, and `env_files`.
 
 <details open markdown="block">
   <summary>Table of contents</summary>
@@ -24,7 +24,7 @@ This guide covers three clawback categories: `shell_profiles`, `environment_vari
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Category | Description |
 |-----------------|----------|----------|-------------|
@@ -138,8 +138,8 @@ grep -n "export.*=.*sk-\|export.*=.*ghp_\|export.*=.*AKIA" \
 # Check .env files in common locations
 find ~/Projects -name ".env" -exec grep -l "sk-\|ghp_\|AKIA" {} \; 2>/dev/null
 
-python3 clawback.py --category shell_profiles --pretty
-python3 clawback.py --category env_files --pretty
+python3 rattlesnake.py --category shell_profiles --pretty
+python3 rattlesnake.py --category env_files --pretty
 ```
 
 ## Common mistakes

@@ -8,9 +8,9 @@ has_toc: false
 
 # Per-system remediation guides
 
-Each guide covers one credential type that clawback detects, with tiered remediation options and copy-pasteable macOS commands.
+Each guide covers one credential type that rattlesnake detects, with tiered remediation options and copy-pasteable macOS commands.
 
-Every guide follows the same structure: what clawback finds, why it is exposed, Tier 1/2/3 remediation options, verification, common mistakes, and CI/CD implications.
+Every guide follows the same structure: what rattlesnake finds, why it is exposed, Tier 1/2/3 remediation options, verification, common mistakes, and CI/CD implications.
 
 ---
 

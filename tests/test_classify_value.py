@@ -5,7 +5,7 @@ import secrets
 
 import pytest
 
-from clawback import (
+from rattlesnake import (
     classify_value,
     shannon_entropy,
     _name_value_suspicious,

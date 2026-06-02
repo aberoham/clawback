@@ -1,4 +1,4 @@
-"""Tests for clawback-restitution remediation pack generator."""
+"""Tests for antivenom remediation pack generator."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from restitution import (
+import restitution
+from antivenom import (
     OP_SSH_AGENT_SOCK,
     OpMatch,
     WorkUnit,
@@ -51,7 +52,7 @@ from restitution import (
 
 
 def _minimal_report(findings=None):
-    """Build a minimal valid clawback report."""
+    """Build a minimal valid rattlesnake report."""
     findings = findings or []
     summary = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for f in findings:
@@ -199,6 +200,10 @@ def _make_work_unit(
 
 
 # ── JSON loading and validation ──────────────────────────────────────
+
+
+def test_legacy_module_exports_main():
+    assert restitution.main is main
 
 
 class TestLoadReport:
@@ -558,7 +563,7 @@ class TestSubtaskSections:
         nfs = [normalize_finding(_ssh_finding())]
         enrichment = {}
         with patch(
-            "restitution._detect_op_ssh_agent",
+            "antivenom._detect_op_ssh_agent",
             return_value=False,
         ):
             md = compile_subtask_section(1, "ssh_harden", nfs, enrichment)
@@ -570,7 +575,7 @@ class TestSubtaskSections:
     def test_ssh_harden_with_op_agent_leads_tier1(self):
         nfs = [normalize_finding(_ssh_finding())]
         with patch(
-            "restitution._detect_op_ssh_agent",
+            "antivenom._detect_op_ssh_agent",
             return_value=True,
         ):
             md = compile_subtask_section(1, "ssh_harden", nfs, {})
@@ -582,7 +587,7 @@ class TestSubtaskSections:
     def test_ssh_encrypted_skips_passphrase(self):
         nfs = [normalize_finding(_ssh_finding(encrypted=True, permissions="0o644"))]
         with patch(
-            "restitution._detect_op_ssh_agent",
+            "antivenom._detect_op_ssh_agent",
             return_value=False,
         ):
             md = compile_subtask_section(1, "ssh_harden", nfs, {})
@@ -592,7 +597,7 @@ class TestSubtaskSections:
     def test_ssh_good_permissions_skips_chmod(self):
         nfs = [normalize_finding(_ssh_finding(encrypted=False, permissions="0o600"))]
         with patch(
-            "restitution._detect_op_ssh_agent",
+            "antivenom._detect_op_ssh_agent",
             return_value=False,
         ):
             md = compile_subtask_section(1, "ssh_harden", nfs, {})
@@ -765,7 +770,7 @@ class TestTaskFile:
     def test_verification_uses_correct_command(self):
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         md = compile_task_file(unit)
-        assert "python3 clawback.py" in md
+        assert "python3 rattlesnake.py" in md
         assert "--pretty" in md
         assert "--json" not in md
         assert "--scan-path" not in md
@@ -971,7 +976,7 @@ class TestPackGeneration:
 
     def test_default_pack_dir_is_timestamped(self):
         d = default_pack_dir()
-        assert d.startswith("tmp/restitution-packs/")
+        assert d.startswith("tmp/antivenom-packs/")
         parts = d.split("/")
         timestamp = parts[-1]
         assert len(timestamp) == 15  # YYYYMMDD-HHMMSS
@@ -985,7 +990,7 @@ class TestEnrichment:
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         # Clear enrichment so we can verify it gets populated.
         unit.enrichment.clear()
-        with patch("restitution.subprocess.run") as mock_run:
+        with patch("antivenom.subprocess.run") as mock_run:
             enrich_work_units([unit], vault=None, dry_run=True)
             mock_run.assert_not_called()
         assert "K" in unit.enrichment
@@ -995,7 +1000,7 @@ class TestEnrichment:
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         unit.enrichment.clear()
         with patch(
-            "restitution.shutil.which",
+            "antivenom.shutil.which",
             return_value=None,
         ):
             enrich_work_units([unit], vault=None, dry_run=False)
@@ -1006,11 +1011,11 @@ class TestEnrichment:
         unit.enrichment.clear()
         with (
             patch(
-                "restitution.check_op_available",
+                "antivenom.check_op_available",
                 return_value=True,
             ),
             patch(
-                "restitution.check_op_authenticated",
+                "antivenom.check_op_authenticated",
                 return_value=False,
             ),
         ):
@@ -1032,7 +1037,7 @@ class TestEnrichment:
 
 class TestSummary:
     def test_summary_is_concise(self, capsys):
-        from restitution import print_pack_summary
+        from antivenom import print_pack_summary
 
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         findings = [normalize_finding(_env_finding())]
@@ -1044,7 +1049,7 @@ class TestSummary:
             op_authenticated=False,
         )
         err = capsys.readouterr().err
-        assert "clawback-restitution" in err
+        assert "antivenom" in err
         assert "1 finding" in err
         assert "1 task" in err
         assert "/tmp/pack" in err
@@ -1058,7 +1063,7 @@ class TestCombinedMode:
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         write_combined([unit])
         out = capsys.readouterr().out
-        assert "# Clawback Remediation Prompts" in out
+        assert "# Rattlesnake Remediation Prompts" in out
         assert "---" in out
         assert "# Task 001-high-test" in out
 
@@ -1118,7 +1123,7 @@ class TestCLI:
         )
         assert rc == 0
         out = capsys.readouterr().out
-        assert "# Clawback Remediation Prompts" in out
+        assert "# Rattlesnake Remediation Prompts" in out
 
     def test_category_filter_via_main(self, tmp_path, capsys):
         report = _minimal_report([_env_finding(), _ssh_finding()])
@@ -1182,11 +1187,11 @@ class TestPreview:
 
 class TestTmux:
     def test_check_tmux_when_missing(self):
-        with patch("restitution.shutil.which", return_value=None):
+        with patch("antivenom.shutil.which", return_value=None):
             assert check_tmux_available() is False
 
     def test_check_tmux_when_present(self):
-        with patch("restitution.shutil.which", return_value="/usr/bin/tmux"):
+        with patch("antivenom.shutil.which", return_value="/usr/bin/tmux"):
             assert check_tmux_available() is True
 
     def test_no_session_when_all_ir(self, capsys):
@@ -1195,7 +1200,7 @@ class TestTmux:
             unit_id="001-critical-ioc",
             label="ioc",
         )
-        with patch("restitution.subprocess.run") as mock_run:
+        with patch("antivenom.subprocess.run") as mock_run:
             create_tmux_session([unit], "/tmp/pack", "test-session")
             mock_run.assert_not_called()
         err = capsys.readouterr().err
@@ -1218,9 +1223,9 @@ class TestTmux:
             (launch_dir / f"{uid}-claude.sh").write_text("#!/usr/bin/env bash\n")
 
         with (
-            patch("restitution.subprocess.run") as mock_run,
+            patch("antivenom.subprocess.run") as mock_run,
             patch(
-                "restitution.check_tmux_available",
+                "antivenom.check_tmux_available",
                 return_value=True,
             ),
         ):
@@ -1243,9 +1248,9 @@ class TestTmux:
         (launch_dir / "001-high-test-claude.sh").write_text("#!/usr/bin/env bash\n")
 
         with (
-            patch("restitution.subprocess.run"),
+            patch("antivenom.subprocess.run"),
             patch(
-                "restitution.check_tmux_available",
+                "antivenom.check_tmux_available",
                 return_value=True,
             ),
         ):
@@ -1265,9 +1270,9 @@ class TestTmux:
         (launch_dir / "001-high-test-claude.sh").write_text("#!/usr/bin/env bash\n")
 
         with (
-            patch("restitution.subprocess.run") as mock_run,
+            patch("antivenom.subprocess.run") as mock_run,
             patch(
-                "restitution.check_tmux_available",
+                "antivenom.check_tmux_available",
                 return_value=True,
             ),
         ):
@@ -1301,8 +1306,8 @@ class TestTmux:
 
 
 class TestGatherEnvironmentLines:
-    @patch("restitution.shutil.which", return_value="/usr/bin/op")
-    @patch("restitution._detect_op_ssh_agent", return_value=False)
+    @patch("antivenom.shutil.which", return_value="/usr/bin/op")
+    @patch("antivenom._detect_op_ssh_agent", return_value=False)
     def test_env_lines_with_op_installed(self, _det, _which):
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         lines = _gather_environment_lines(unit)
@@ -1311,16 +1316,16 @@ class TestGatherEnvironmentLines:
         assert "Scanner:" in text
         assert "1Password CLI:** installed" in text
 
-    @patch("restitution.shutil.which", return_value=None)
-    @patch("restitution._detect_op_ssh_agent", return_value=False)
+    @patch("antivenom.shutil.which", return_value=None)
+    @patch("antivenom._detect_op_ssh_agent", return_value=False)
     def test_env_lines_without_op(self, _det, _which):
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         lines = _gather_environment_lines(unit)
         text = "\n".join(lines)
         assert "1Password CLI:** not installed" in text
 
-    @patch("restitution.shutil.which", return_value="/usr/bin/op")
-    @patch("restitution._detect_op_ssh_agent", return_value=True)
+    @patch("antivenom.shutil.which", return_value="/usr/bin/op")
+    @patch("antivenom._detect_op_ssh_agent", return_value=True)
     def test_env_lines_ssh_agent_active(self, _det, _which):
         unit = _make_work_unit(
             [_ssh_finding()],
@@ -1332,8 +1337,8 @@ class TestGatherEnvironmentLines:
         text = "\n".join(lines)
         assert "1Password SSH agent:** active" in text
 
-    @patch("restitution.shutil.which")
-    @patch("restitution._detect_op_ssh_agent", return_value=False)
+    @patch("antivenom.shutil.which")
+    @patch("antivenom._detect_op_ssh_agent", return_value=False)
     def test_env_lines_kubectl_not_available(self, _det, mock_w):
         mock_w.side_effect = lambda cmd: "/usr/bin/op" if cmd == "op" else None
         raw = {
@@ -1474,7 +1479,7 @@ class TestRenderIndexEntry:
         )
         lines = _render_index_entry(unit)
         text = "\n".join(lines)
-        assert "clawback.py --pretty`" in text
+        assert "rattlesnake.py --pretty`" in text
         assert "# categories" not in text
         assert "covers categories:" in text
 
@@ -1499,12 +1504,12 @@ class TestPackPath:
 
 class TestResolveOpSshSock:
     def test_well_known_path_exists(self):
-        with patch("restitution.os.path.exists", return_value=True):
+        with patch("antivenom.os.path.exists", return_value=True):
             assert _resolve_op_ssh_sock() == OP_SSH_AGENT_SOCK
 
     def test_well_known_path_missing_falls_through_to_env(self):
         with (
-            patch("restitution.os.path.exists", return_value=False),
+            patch("antivenom.os.path.exists", return_value=False),
             patch.dict(os.environ, {"SSH_AUTH_SOCK": ""}, clear=False),
         ):
             assert _resolve_op_ssh_sock() is None
@@ -1512,7 +1517,7 @@ class TestResolveOpSshSock:
     def test_ssh_auth_sock_with_1password_path(self, tmp_path):
         sock_path = str(tmp_path / "1password-agent.sock")
         with (
-            patch("restitution.os.path.exists", return_value=False),
+            patch("antivenom.os.path.exists", return_value=False),
             patch.dict(os.environ, {"SSH_AUTH_SOCK": sock_path}, clear=False),
         ):
             result = _resolve_op_ssh_sock()
@@ -1525,7 +1530,7 @@ class TestResolveOpSshSock:
         link = tmp_path / "agent-link.sock"
         link.symlink_to(target)
         with (
-            patch("restitution.os.path.exists", return_value=False),
+            patch("antivenom.os.path.exists", return_value=False),
             patch.dict(os.environ, {"SSH_AUTH_SOCK": str(link)}, clear=False),
         ):
             result = _resolve_op_ssh_sock()
@@ -1534,7 +1539,7 @@ class TestResolveOpSshSock:
     def test_ssh_auth_sock_unrelated_socket(self, tmp_path):
         sock_path = str(tmp_path / "gnome-keyring" / "ssh")
         with (
-            patch("restitution.os.path.exists", return_value=False),
+            patch("antivenom.os.path.exists", return_value=False),
             patch.dict(os.environ, {"SSH_AUTH_SOCK": sock_path}, clear=False),
         ):
             assert _resolve_op_ssh_sock() is None
@@ -1544,7 +1549,7 @@ class TestDetectOpSshAgent:
     def test_returns_false_when_no_socket(self):
         _detect_op_ssh_agent.cache_clear()
         with (
-            patch("restitution._resolve_op_ssh_sock", return_value=None),
+            patch("antivenom._resolve_op_ssh_sock", return_value=None),
         ):
             assert _detect_op_ssh_agent() is False
         _detect_op_ssh_agent.cache_clear()
@@ -1553,10 +1558,10 @@ class TestDetectOpSshAgent:
         _detect_op_ssh_agent.cache_clear()
         with (
             patch(
-                "restitution._resolve_op_ssh_sock",
+                "antivenom._resolve_op_ssh_sock",
                 return_value="/tmp/agent.sock",
             ),
-            patch("restitution._socket_is_live", return_value=True),
+            patch("antivenom._socket_is_live", return_value=True),
         ):
             assert _detect_op_ssh_agent() is True
         _detect_op_ssh_agent.cache_clear()
@@ -1565,10 +1570,10 @@ class TestDetectOpSshAgent:
         _detect_op_ssh_agent.cache_clear()
         with (
             patch(
-                "restitution._resolve_op_ssh_sock",
+                "antivenom._resolve_op_ssh_sock",
                 return_value="/tmp/agent.sock",
             ),
-            patch("restitution._socket_is_live", return_value=False),
+            patch("antivenom._socket_is_live", return_value=False),
         ):
             assert _detect_op_ssh_agent() is False
         _detect_op_ssh_agent.cache_clear()

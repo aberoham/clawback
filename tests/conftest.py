@@ -1,4 +1,4 @@
-"""Shared fixtures for clawback test suite."""
+"""Shared fixtures for rattlesnake test suite."""
 from __future__ import annotations
 
 import os
@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from clawback import (  # noqa: E402
+from rattlesnake import (  # noqa: E402
     GENERIC_SECRET_RE,
     NAMED_SECRET_VARS,
     ScanContext,
