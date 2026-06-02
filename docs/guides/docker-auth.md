@@ -3,9 +3,9 @@ title: Docker Registry Auth
 parent: Remediation Guides
 nav_order: 8
 description: >-
-  Remediate Docker registry credentials found by clawback in
+  Remediate Docker registry credentials found by rattlesnake in
   ~/.docker/config.json.
-clawback_category: package_manager_tokens
+rattlesnake_category: package_manager_tokens
 ---
 
 # Docker registry auth
@@ -22,7 +22,7 @@ Docker stores registry credentials in `~/.docker/config.json`. By default, these
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -119,7 +119,7 @@ if not auths or all(not v.get('auth') for v in auths.values()):
     print('OK: no plaintext credentials')
 "
 
-python3 clawback.py --category package_manager_tokens --pretty
+python3 rattlesnake.py --category package_manager_tokens --pretty
 ```
 
 ## Common mistakes

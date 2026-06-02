@@ -4,8 +4,8 @@ parent: Remediation Guides
 nav_order: 3
 description: >-
   Remediate Azure CLI token caches and service principal secrets found by
-  clawback in ~/.azure/ and AZURE_CLIENT_SECRET.
-clawback_category: cloud_credentials
+  rattlesnake in ~/.azure/ and AZURE_CLIENT_SECRET.
+rattlesnake_category: cloud_credentials
 ---
 
 # Azure cached tokens and client secrets
@@ -22,7 +22,7 @@ Azure CLI caches authentication tokens on disk. On macOS, these caches are **sto
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -126,7 +126,7 @@ az config get core.encrypt_token_cache
 # Check for AZURE_CLIENT_SECRET in environment
 env | grep AZURE_CLIENT_SECRET  # should be empty
 
-python3 clawback.py --category cloud_credentials --pretty
+python3 rattlesnake.py --category cloud_credentials --pretty
 ```
 
 ## Common mistakes

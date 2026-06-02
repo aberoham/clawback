@@ -6,8 +6,8 @@ import sys
 
 import pytest
 
-import clawback
-from clawback import scan_teampcp_iocs
+import rattlesnake
+from rattlesnake import scan_teampcp_iocs
 
 
 def _null_run_cmd(*args, **kwargs):
@@ -44,7 +44,7 @@ def redirect_tmp(tmp_path, monkeypatch):
 
 class TestTeamPCPFileIoCs:
     def test_pgmon_directory(self, scan_ctx, monkeypatch, clean_env):
-        monkeypatch.setattr(clawback, "run_cmd", _null_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", _null_run_cmd)
         pgmon = scan_ctx.home / ".local" / "share" / "pgmon"
         pgmon.mkdir(parents=True)
         scan_teampcp_iocs(scan_ctx, quiet=True)
@@ -55,7 +55,7 @@ class TestTeamPCPFileIoCs:
         assert all(f.severity == "critical" for f in findings)
 
     def test_pgmon_service_py(self, scan_ctx, monkeypatch, clean_env):
-        monkeypatch.setattr(clawback, "run_cmd", _null_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", _null_run_cmd)
         pgmon = scan_ctx.home / ".local" / "share" / "pgmon"
         pgmon.mkdir(parents=True)
         (pgmon / "service.py").write_text("# malicious")
@@ -66,7 +66,7 @@ class TestTeamPCPFileIoCs:
     def test_tmp_pglog(
         self, scan_ctx, monkeypatch, redirect_tmp, clean_env
     ):
-        monkeypatch.setattr(clawback, "run_cmd", _null_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", _null_run_cmd)
         (redirect_tmp / "pglog").write_text("log data")
         scan_teampcp_iocs(scan_ctx, quiet=True)
         findings = [
@@ -76,7 +76,7 @@ class TestTeamPCPFileIoCs:
         assert findings[0].severity == "critical"
 
     def test_tpcp_tar_in_home(self, scan_ctx, monkeypatch, clean_env):
-        monkeypatch.setattr(clawback, "run_cmd", _null_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", _null_run_cmd)
         (scan_ctx.home / "tpcp.tar.gz").write_text("fake")
         scan_teampcp_iocs(scan_ctx, quiet=True)
         findings = [
@@ -95,7 +95,7 @@ class TestTeamPCPLaunchAgents:
     def test_plist_with_marker_in_content(
         self, scan_ctx, monkeypatch, clean_env
     ):
-        monkeypatch.setattr(clawback, "run_cmd", _null_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", _null_run_cmd)
         la_dir = scan_ctx.home / "Library" / "LaunchAgents"
         la_dir.mkdir(parents=True)
         plist = la_dir / "com.example.agent.plist"
@@ -117,7 +117,7 @@ class TestTeamPCPLaunchAgents:
     def test_plist_with_marker_in_name(
         self, scan_ctx, monkeypatch, clean_env
     ):
-        monkeypatch.setattr(clawback, "run_cmd", _null_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", _null_run_cmd)
         la_dir = scan_ctx.home / "Library" / "LaunchAgents"
         la_dir.mkdir(parents=True)
         (la_dir / "com.pgmon.agent.plist").write_text("<plist/>")
@@ -131,7 +131,7 @@ class TestTeamPCPLaunchAgents:
     def test_clean_plist_no_finding(
         self, scan_ctx, monkeypatch, clean_env
     ):
-        monkeypatch.setattr(clawback, "run_cmd", _null_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", _null_run_cmd)
         la_dir = scan_ctx.home / "Library" / "LaunchAgents"
         la_dir.mkdir(parents=True)
         (la_dir / "com.apple.something.plist").write_text(
@@ -158,7 +158,7 @@ class TestTeamPCPProcessCheck:
                 )
             return None
 
-        monkeypatch.setattr(clawback, "run_cmd", fake_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", fake_run_cmd)
         scan_teampcp_iocs(scan_ctx, quiet=True)
         findings = [
             f for f in scan_ctx.findings
@@ -173,7 +173,7 @@ class TestTeamPCPProcessCheck:
                 return "USER  PID %CPU\nroot  1  0.0 /sbin/init\n"
             return None
 
-        monkeypatch.setattr(clawback, "run_cmd", fake_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", fake_run_cmd)
         scan_teampcp_iocs(scan_ctx, quiet=True)
         assert len(scan_ctx.findings) == 0
 
@@ -200,7 +200,7 @@ class TestTeamPCPSitePackages:
                 return str(site_dir) + "\n"
             return None
 
-        monkeypatch.setattr(clawback, "run_cmd", fake_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", fake_run_cmd)
         scan_teampcp_iocs(scan_ctx, quiet=True)
         findings = [
             f for f in scan_ctx.findings

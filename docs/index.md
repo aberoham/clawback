@@ -4,29 +4,29 @@ layout: default
 nav_order: 1
 ---
 
-# Clawback Remediation Library
+# Rattlesnake Remediation Library
 
-This site is the companion to [clawback](https://github.com/aberoham/clawback), a macOS endpoint scanner that finds static credentials on developer workstations.
+This site is the companion to [rattlesnake](https://github.com/aberoham/rattlesnake), a macOS endpoint scanner that finds static credentials on developer workstations.
 
-Clawback tells you **what is exposed**. This library tells you **how to fix it**.
+Rattlesnake tells you **what is exposed**. This library tells you **how to fix it**.
 
 ---
 
 ## How to use this library
 
-1. Run clawback on your machine:
+1. Run rattlesnake on your machine:
 
    ```bash
-   python3 clawback.py --pretty
+   python3 rattlesnake.py --pretty
    ```
 
 2. For each finding, open the matching remediation guide below.
 3. Pick a [tier](concepts/tier-definitions.md) appropriate to your situation.
-4. Follow the commands. Verify with clawback.
+4. Follow the commands. Verify with rattlesnake.
 
 ## Architecture
 
-- [Architecture diagrams](architecture.md) -- scanning and restitution flows
+- [Architecture diagrams](architecture.md) -- scanning and antivenom flows
 
 ## Concepts
 
@@ -45,7 +45,7 @@ Start here if you are a security engineer building a remediation program.
 
 Jump directly to a credential type.
 
-| Credential type | clawback category | Guide |
+| Credential type | rattlesnake category | Guide |
 |----------------|-------------------|-------|
 | AWS static access keys | `cloud_credentials` | [Guide](guides/aws-keys.md) |
 | GCP application default credentials | `cloud_credentials` | [Guide](guides/gcp-credentials.md) |

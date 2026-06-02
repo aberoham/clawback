@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from clawback import (
+from rattlesnake import (
     _char_class_distribution,
     _source_category,
     _value_fingerprint,

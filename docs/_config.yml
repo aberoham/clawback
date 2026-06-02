@@ -1,25 +1,25 @@
-title: Clawback
+title: Rattlesnake
 description: >-
   Credential remediation guides for macOS developer workstations.
-  Companion to the clawback endpoint scanner.
+  Companion to the rattlesnake endpoint scanner.
 
 remote_theme: just-the-docs/just-the-docs@v0.10.0
 
 url: ""
-baseurl: "/clawback"
+baseurl: "/rattlesnake"
 
 search_enabled: true
 search.heading_level: 3
 nav_fold: true
 color_scheme: light
-favicon_ico: "/clawback/assets/images/favicon.ico"
+favicon_ico: "/rattlesnake/assets/images/favicon.ico"
 
 aux_links:
   "GitHub":
-    - "https://github.com/aberoham/clawback"
+    - "https://github.com/aberoham/rattlesnake"
 
 footer_content: >-
-  Clawback Remediation Library &mdash; MIT License.
+  Rattlesnake Remediation Library &mdash; MIT License.
 
 exclude:
   - prompts/

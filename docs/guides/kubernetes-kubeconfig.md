@@ -3,9 +3,9 @@ title: Kubernetes Kubeconfig
 parent: Remediation Guides
 nav_order: 11
 description: >-
-  Remediate embedded tokens and certificates found by clawback in
+  Remediate embedded tokens and certificates found by rattlesnake in
   ~/.kube/config.
-clawback_category: kubernetes
+rattlesnake_category: kubernetes
 ---
 
 # Kubernetes kubeconfig
@@ -22,7 +22,7 @@ Kubeconfig files can embed long-lived bearer tokens, client certificates, and pr
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -119,7 +119,7 @@ else:
     print('OK: all users use exec plugins')
 "
 
-python3 clawback.py --category kubernetes --pretty
+python3 rattlesnake.py --category kubernetes --pretty
 ```
 
 ## Common mistakes

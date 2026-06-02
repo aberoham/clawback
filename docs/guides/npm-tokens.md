@@ -3,8 +3,8 @@ title: npm Tokens
 parent: Remediation Guides
 nav_order: 6
 description: >-
-  Remediate npm authentication tokens found by clawback in ~/.npmrc.
-clawback_category: package_manager_tokens
+  Remediate npm authentication tokens found by rattlesnake in ~/.npmrc.
+rattlesnake_category: package_manager_tokens
 ---
 
 # npm tokens
@@ -21,7 +21,7 @@ npm tokens in `~/.npmrc` are a primary supply chain attack vector. The November 
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -127,7 +127,7 @@ grep -n "_authToken\|_auth=" ~/.npmrc .npmrc 2>/dev/null
 
 npm whoami  # verify current session
 
-python3 clawback.py --category package_manager_tokens --pretty
+python3 rattlesnake.py --category package_manager_tokens --pretty
 ```
 
 ## Common mistakes

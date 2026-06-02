@@ -5,7 +5,7 @@ import secrets
 
 import pytest
 
-from clawback import (
+from rattlesnake import (
     _is_env_filename,
     _parse_env_line,
     scan_env_files,

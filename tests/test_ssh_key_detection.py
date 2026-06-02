@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from clawback import (
+from rattlesnake import (
     _check_ssh_key_encryption,
     _detect_ssh_key_type,
     scan_ssh_keys,

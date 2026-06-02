@@ -3,9 +3,9 @@ title: Cryptocurrency Wallets
 parent: Remediation Guides
 nav_order: 13
 description: >-
-  Remediate cryptocurrency wallet exposure found by clawback in
+  Remediate cryptocurrency wallet exposure found by rattlesnake in
   ~/Library/Application Support/ and Solana keypairs.
-clawback_category: crypto_wallets
+rattlesnake_category: crypto_wallets
 ---
 
 # Cryptocurrency wallets
@@ -22,7 +22,7 @@ Cryptocurrency wallets contain private keys or seed phrases that control on-chai
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -98,7 +98,7 @@ ls -la ~/.config/solana/id.json 2>/dev/null
 # Verify wallet app signatures
 codesign --verify --deep --strict "/Applications/Ledger Live.app" 2>&1
 
-python3 clawback.py --category crypto_wallets --pretty
+python3 rattlesnake.py --category crypto_wallets --pretty
 ```
 
 ## Common mistakes

@@ -34,13 +34,13 @@ This pattern repeats across nearly every credential type. The new secure mechani
 
 **During remediation:** explicitly delete or clear the legacy file as a discrete step. Do not assume that configuring the new mechanism removes the old artifact.
 
-**After remediation:** re-run clawback to verify the plaintext file is gone, not just that the new configuration is in place:
+**After remediation:** re-run rattlesnake to verify the plaintext file is gone, not just that the new configuration is in place:
 
 ```bash
-python3 clawback.py --pretty
+python3 rattlesnake.py --pretty
 ```
 
-**In clawback itself:** this pattern warrants a dedicated detection. After observing a secure configuration (SSO profile present, credential helper configured, exec plugin in kubeconfig), also check whether the legacy plaintext artifact still exists. If it does, emit a finding even though the "correct" configuration is in place.
+**In rattlesnake itself:** this pattern warrants a dedicated detection. After observing a secure configuration (SSO profile present, credential helper configured, exec plugin in kubeconfig), also check whether the legacy plaintext artifact still exists. If it does, emit a finding even though the "correct" configuration is in place.
 
 ## The AWS prioritization bug
 

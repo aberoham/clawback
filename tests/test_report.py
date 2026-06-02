@@ -1,7 +1,7 @@
 """Tests for report structure and JAMF EA line formatting."""
 from __future__ import annotations
 
-from clawback import Severity, build_report, jamf_ea_line
+from rattlesnake import Severity, build_report, jamf_ea_line
 
 
 class TestBuildReport:

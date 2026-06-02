@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-import clawback
-from clawback import (
+import rattlesnake
+from rattlesnake import (
     scan_cloud_credentials,
     scan_crypto_wallets,
     scan_git_credentials,
@@ -324,7 +324,7 @@ class TestScanKubernetes:
     def test_embedded_token_critical(
         self, scan_ctx, monkeypatch, clean_env
     ):
-        monkeypatch.setattr(clawback, "_check_cert_expiry", lambda _: None)
+        monkeypatch.setattr(rattlesnake, "_check_cert_expiry", lambda _: None)
         kube = scan_ctx.home / ".kube"
         kube.mkdir()
         (kube / "config").write_text(
@@ -346,7 +346,7 @@ class TestScanKubernetes:
     def test_embedded_cert_data_high(
         self, scan_ctx, monkeypatch, clean_env
     ):
-        monkeypatch.setattr(clawback, "_check_cert_expiry", lambda _: None)
+        monkeypatch.setattr(rattlesnake, "_check_cert_expiry", lambda _: None)
         kube = scan_ctx.home / ".kube"
         kube.mkdir()
         (kube / "config").write_text(
@@ -371,7 +371,7 @@ class TestScanKubernetes:
         """When embedded creds are cert-only and the cert is expired,
         severity is downgraded to LOW (useless to an attacker)."""
         monkeypatch.setattr(
-            clawback, "_check_cert_expiry",
+            rattlesnake, "_check_cert_expiry",
             lambda _: "Jan  1 00:00:00 2020 GMT",
         )
         kube = scan_ctx.home / ".kube"
@@ -425,7 +425,7 @@ class TestScanKubernetes:
     def test_kubeconfig_env_override(
         self, scan_ctx, monkeypatch, clean_env
     ):
-        monkeypatch.setattr(clawback, "_check_cert_expiry", lambda _: None)
+        monkeypatch.setattr(rattlesnake, "_check_cert_expiry", lambda _: None)
         custom = scan_ctx.home / "custom-kube"
         custom.write_text(
             "apiVersion: v1\n"
@@ -483,7 +483,7 @@ class TestScanSecretsManagerStatus:
                 return "/usr/local/bin/op\n"
             return None
 
-        monkeypatch.setattr(clawback, "run_cmd", fake_run_cmd)
+        monkeypatch.setattr(rattlesnake, "run_cmd", fake_run_cmd)
         scan_secrets_manager_status(scan_ctx, quiet=True)
         obs = [
             o for o in scan_ctx.observations
@@ -493,7 +493,7 @@ class TestScanSecretsManagerStatus:
 
     def test_nothing_installed(self, scan_ctx, monkeypatch, clean_env):
         monkeypatch.setattr(
-            clawback, "run_cmd", lambda *a, **kw: None
+            rattlesnake, "run_cmd", lambda *a, **kw: None
         )
         scan_secrets_manager_status(scan_ctx, quiet=True)
         assert len(scan_ctx.observations) == 0

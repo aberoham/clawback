@@ -3,9 +3,9 @@ title: AWS Static Access Keys
 parent: Remediation Guides
 nav_order: 1
 description: >-
-  Remediate AWS access key IDs and secret access keys found by clawback
+  Remediate AWS access key IDs and secret access keys found by rattlesnake
   in ~/.aws/credentials, environment variables, and shell profiles.
-clawback_category: cloud_credentials
+rattlesnake_category: cloud_credentials
 ---
 
 # AWS static access keys
@@ -22,7 +22,7 @@ AWS static access keys are long-lived IAM credentials that grant programmatic ac
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -158,8 +158,8 @@ cat ~/.aws/credentials 2>/dev/null  # should be empty or not exist
 # Confirm SSO is working
 aws sts get-caller-identity --profile <PROFILE_NAME>
 
-# Run clawback
-python3 clawback.py --category cloud_credentials --pretty
+# Run rattlesnake
+python3 rattlesnake.py --category cloud_credentials --pretty
 ```
 
 **After Tier 2:**

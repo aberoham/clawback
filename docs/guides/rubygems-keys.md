@@ -3,8 +3,8 @@ title: RubyGems API Keys
 parent: Remediation Guides
 nav_order: 9
 description: >-
-  Remediate RubyGems API keys found by clawback in ~/.gem/credentials.
-clawback_category: package_manager_tokens
+  Remediate RubyGems API keys found by rattlesnake in ~/.gem/credentials.
+rattlesnake_category: package_manager_tokens
 ---
 
 # RubyGems API keys
@@ -21,7 +21,7 @@ RubyGems API keys in `~/.gem/credentials` grant push access to the RubyGems.org 
 
 ---
 
-## What clawback finds
+## What rattlesnake finds
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
@@ -97,7 +97,7 @@ ls -la ~/.gem/credentials  # should not exist
 # If GEM_HOST_API_KEY is used, verify it's not hardcoded in shell profile
 grep "GEM_HOST_API_KEY" ~/.zshrc ~/.bashrc 2>/dev/null  # should find nothing
 
-python3 clawback.py --category package_manager_tokens --pretty
+python3 rattlesnake.py --category package_manager_tokens --pretty
 ```
 
 ## Common mistakes
