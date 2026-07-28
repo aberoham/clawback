@@ -5,6 +5,11 @@ Scans for credential files and secrets targeted by supply chain attacks
 (TeamPCP/CanisterWorm campaign, March 2026). Designed for deployment via
 JAMF or CrowdStrike RTR. Pure Python 3.9.6+ stdlib, single file, read-only.
 
+The `mcp_configs` category detects hardcoded, plaintext secrets in local
+MCP / AI-agent configuration files (Claude Desktop/Code, Cursor, Cline/Roo,
+Windsurf, Continue, VS Code MCP). Like every other category it emits only
+locations + classification reasons — never the secret value itself.
+
 Exit codes:
     0 — No findings
     1 — Findings present
@@ -33,7 +38,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MAX_READ_BYTES = 65536
 SSH_KEY_READ_BYTES = 2048
 ENV_FILE_READ_BYTES = 4096
@@ -1529,6 +1534,337 @@ def scan_secrets_manager_status(ctx: ScanContext, quiet: bool) -> None:
 
 
 # -------------------------------------------------------------------
+# Category 12: MCP / AI-agent configuration secrets
+# -------------------------------------------------------------------
+#
+# Detects hardcoded, plaintext secrets in local MCP / AI-agent config
+# files. The secure pattern — a ${ENV_VAR} reference resolved at launch —
+# is explicitly NOT a finding; only literal values are. As with every
+# other category, output contains locations and classification reasons
+# only, never the secret value.
+
+MCP_FILE_READ_BYTES = 1_000_000  # ~/.claude.json can be large; needs full JSON
+
+# Home-relative MCP / AI-agent config files (macOS).
+MCP_HOME_CONFIGS = (
+    ".claude.json",                                   # Claude Code
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    "Library/Application Support/Claude/claude_desktop_config.json",  # Claude Desktop
+    ".cursor/mcp.json",                               # Cursor (global)
+    ".codeium/windsurf/mcp_config.json",              # Windsurf
+    ".continue/config.json",                          # Continue
+    ".continue/config.yaml",                          # Continue (YAML variant)
+)
+
+# VS Code-family globalStorage roots that may hold Cline/Roo MCP settings.
+MCP_GLOBALSTORAGE_ROOTS = (
+    "Library/Application Support/Code/User/globalStorage",
+    "Library/Application Support/Code - Insiders/User/globalStorage",
+    "Library/Application Support/Cursor/User/globalStorage",
+    "Library/Application Support/VSCodium/User/globalStorage",
+    "Library/Application Support/Windsurf/User/globalStorage",
+)
+
+# Project-level MCP config filenames found while walking dev directories.
+MCP_PROJECT_FILENAMES = frozenset({".mcp.json", "mcp.json"})
+# Hidden dirs we DO descend into (normally pruned) — MCP configs live here.
+MCP_KEEP_HIDDEN_DIRS = frozenset({".cursor", ".vscode", ".claude"})
+
+# Key names (case-insensitive, - and _ folded) that denote credential material.
+MCP_SECRET_KEY_NAMES = frozenset({
+    "apikey", "api_key", "token", "access_token", "accesstoken",
+    "password", "passwd", "secret", "client_secret", "authorization",
+    "auth", "bearer", "key", "private_key", "apitoken",
+})
+
+# Prefixes that make an MCP literal secret CRITICAL (cloud / SCM / prod scope).
+MCP_CRITICAL_PREFIXES = frozenset({
+    "AKIA", "ghp_", "gho_", "ghs_", "github_pat_", "glpat-",
+    "sk-ant-", "sk-", "xoxb-", "xoxp-",
+})
+
+_SEV_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
+
+def _max_severity(sev_values: List[str]) -> Severity:
+    best = max(sev_values, key=lambda s: _SEV_ORDER.get(s, 0))
+    return Severity(best)
+
+
+def _mcp_tool_label(path: pathlib.Path) -> str:
+    p = str(path).lower()
+    if "claude_desktop_config" in p:
+        return "Claude Desktop"
+    if "cline" in p or "roo" in p:
+        return "Cline/Roo"
+    if ".claude" in p:
+        return "Claude Code"
+    if "cursor" in p:
+        return "Cursor"
+    if "windsurf" in p or "codeium" in p:
+        return "Windsurf"
+    if "continue" in p:
+        return "Continue"
+    if ".vscode" in p:
+        return "VS Code MCP"
+    return "MCP (generic)"
+
+
+def _mcp_key_looks_secret(key: str) -> bool:
+    folded = key.lower().replace("-", "_")
+    if folded in MCP_SECRET_KEY_NAMES:
+        return True
+    return bool(GENERIC_SECRET_RE.fullmatch(key))
+
+
+def _first_known_prefix(s: str) -> Optional[str]:
+    for prefix in KNOWN_SECRET_PREFIXES:
+        if s.startswith(prefix):
+            return prefix
+    return None
+
+
+def _iter_json_strings(node: Any, trail: List[str]):
+    """Yield (trail, key, value) for every string leaf in a parsed JSON tree."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            key = str(k)
+            if isinstance(v, str):
+                yield (trail, key, v)
+            elif isinstance(v, (dict, list)):
+                yield from _iter_json_strings(v, trail + [key])
+    elif isinstance(node, list):
+        parent = trail[-1] if trail else ""
+        for v in node:
+            if isinstance(v, str):
+                yield (trail, parent, v)
+            elif isinstance(v, (dict, list)):
+                yield from _iter_json_strings(v, trail)
+
+
+def _mcp_severity(reason: str) -> Severity:
+    if reason.startswith("known_prefix:") or reason.startswith("raw_prefix:"):
+        prefix = reason.split(":", 1)[1]
+        return Severity.CRITICAL if prefix in MCP_CRITICAL_PREFIXES else Severity.HIGH
+    if reason == "url_with_credentials" or reason == "long_hex":
+        return Severity.HIGH
+    if reason.startswith("high_entropy") or reason.startswith("likely_base64"):
+        return Severity.HIGH
+    if reason.startswith("name_plus_value"):
+        return Severity.MEDIUM
+    return Severity.HIGH
+
+
+def _classify_mcp_value(
+    key: str, value: str, in_auth: bool
+) -> Tuple[str, str]:
+    """Return (kind, reason) where kind is 'literal', 'ref', or 'none'.
+
+    'ref' is a ${ENV}/op:// reference — the SECURE pattern, not a finding.
+    Never returns or stores the value itself.
+    """
+    stripped = _strip_quotes(value)
+
+    # Authorization/Bearer headers: strip the scheme, classify the token.
+    if in_auth or key.lower() in ("authorization", "bearer"):
+        m = re.match(r"(?i)^(bearer|token|basic)\s+(.+)$", stripped)
+        if m:
+            stripped = m.group(2).strip()
+
+    if not stripped:
+        return ("none", "empty")
+    # Env-var / secrets-manager references are the target-state, not exposures.
+    if (
+        stripped.startswith("${")
+        or stripped == "$"
+        or re.search(r"\$[A-Za-z_{]", stripped)
+    ):
+        return ("ref", "env_reference")
+    if stripped.startswith("op://"):
+        return ("ref", "1password_reference")
+
+    is_secret, reason = classify_value(stripped)
+    if is_secret:
+        return ("literal", reason)
+
+    # Name-aware second pass: moderate-entropy literal under a secret-y key.
+    if _mcp_key_looks_secret(key) and reason == "benign":
+        nv_hit, nv_reason = _name_value_suspicious(stripped)
+        if nv_hit:
+            return ("literal", nv_reason)
+
+    return ("none", reason)
+
+
+def _scan_mcp_file(ctx: ScanContext, cat: str, path: pathlib.Path) -> None:
+    content = safe_read(path, MCP_FILE_READ_BYTES)
+    if not content or not content.strip():
+        return
+
+    tool = _mcp_tool_label(path)
+    literals: List[Dict[str, Any]] = []
+    ref_count = 0
+
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        data = None
+
+    if data is not None:
+        for trail, key, value in _iter_json_strings(data, []):
+            tl = [t.lower() for t in trail]
+            in_env = "env" in tl
+            in_auth = "headers" in tl or key.lower() == "authorization"
+            relevant = in_env or in_auth or _mcp_key_looks_secret(key)
+            strong = _first_known_prefix(_strip_quotes(value)) is not None
+            if not relevant and not strong:
+                continue
+
+            kind, reason = _classify_mcp_value(key, value, in_auth)
+            if kind == "ref":
+                if in_env or in_auth:
+                    ref_count += 1
+            elif kind == "literal":
+                location = ".".join(trail + [key]) if trail else key
+                if len(location) > 80:
+                    location = "…" + location[-79:]
+                literals.append({
+                    "location": location,
+                    "key": key,
+                    "reason": reason,
+                    "severity": _mcp_severity(reason).value,
+                })
+    else:
+        # Truncated JSON or YAML: fall back to prefix presence (no values).
+        for prefix in KNOWN_SECRET_PREFIXES:
+            if prefix in content:
+                literals.append({
+                    "location": "raw_match",
+                    "key": "unknown",
+                    "reason": f"raw_prefix:{prefix}",
+                    "severity": _mcp_severity(f"raw_prefix:{prefix}").value,
+                })
+        ref_count += len(re.findall(r"\$\{[A-Za-z_]", content))
+
+    if literals:
+        severity = _max_severity([l["severity"] for l in literals])
+        locations = [l["location"] for l in literals]
+        ctx.add(
+            cat, path, severity,
+            f"{tool} MCP config with {len(literals)} literal secret(s), "
+            f"{ref_count} env-ref(s): {', '.join(locations[:4])}"
+            + (f" (+{len(locations) - 4} more)" if len(locations) > 4 else ""),
+            "Replace literal secrets with ${ENV_VAR} references injected at "
+            "launch, or use the OS keychain / a secrets manager. Add MCP "
+            "config paths to .gitignore. Rotate any credential that was literal.",
+            tool=tool,
+            literal_count=len(literals),
+            ref_count=ref_count,
+            secrets=literals,  # locations + reasons only — never the value
+        )
+    else:
+        # Config present but clean — recorded so prevalence has a denominator.
+        ctx.observe(
+            cat, path,
+            f"{tool} MCP config present, no literal secrets "
+            f"({ref_count} env-ref(s))",
+            reason="mcp_config_no_literal_secret",
+            tool=tool,
+            ref_count=ref_count,
+        )
+
+
+def _walk_for_mcp_files(
+    directory: pathlib.Path, depth: int, add
+) -> None:
+    if depth > ENV_MAX_DEPTH:
+        return
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir():
+                if entry.name in ENV_PRUNE_DIRS:
+                    continue
+                if entry.name.startswith(".") and entry.name not in MCP_KEEP_HIDDEN_DIRS:
+                    continue
+                _walk_for_mcp_files(entry, depth + 1, add)
+            elif entry.is_file():
+                name = entry.name
+                parent = entry.parent.name
+                if name in MCP_PROJECT_FILENAMES or (
+                    parent in MCP_KEEP_HIDDEN_DIRS
+                    and name.endswith(".json")
+                    and ("mcp" in name.lower() or "settings" in name.lower())
+                ):
+                    add(entry)
+        except OSError:
+            pass
+
+
+def _discover_mcp_configs(ctx: ScanContext) -> List[pathlib.Path]:
+    found: List[pathlib.Path] = []
+    seen = set()
+
+    def add(p: pathlib.Path) -> None:
+        try:
+            rp = p.resolve()
+        except OSError:
+            rp = p
+        if rp in seen:
+            return
+        if file_exists_nonempty(p):
+            seen.add(rp)
+            found.append(p)
+
+    for rel in MCP_HOME_CONFIGS:
+        add(ctx.home / rel)
+
+    # Cline/Roo settings under VS Code-family globalStorage.
+    for rel in MCP_GLOBALSTORAGE_ROOTS:
+        base = ctx.home / rel
+        if not base.is_dir():
+            continue
+        try:
+            for ext_dir in base.iterdir():
+                if not ext_dir.is_dir():
+                    continue
+                for sub in (ext_dir, ext_dir / "settings"):
+                    if not sub.is_dir():
+                        continue
+                    try:
+                        for f in sub.iterdir():
+                            if (
+                                f.is_file()
+                                and f.name.endswith(".json")
+                                and "mcp" in f.name.lower()
+                            ):
+                                add(f)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    # Project-level configs inside developer directories.
+    for dirname in ENV_SCAN_DIRS:
+        root = ctx.home / dirname
+        if root.is_dir():
+            _walk_for_mcp_files(root, 0, add)
+
+    return found
+
+
+def scan_mcp_configs(ctx: ScanContext, quiet: bool) -> None:
+    progress("MCP / AI-agent configs", quiet)
+    cat = "mcp_configs"
+    for path in _discover_mcp_configs(ctx):
+        _scan_mcp_file(ctx, cat, path)
+
+
+# -------------------------------------------------------------------
 # Orchestration
 # -------------------------------------------------------------------
 
@@ -1543,6 +1879,7 @@ ALL_SCANS = [
     ("environment_variables", scan_environment_variables),
     ("env_files", scan_env_files),
     ("crypto_wallets", scan_crypto_wallets),
+    ("mcp_configs", scan_mcp_configs),
     ("secrets_manager_status", scan_secrets_manager_status),
 ]
 

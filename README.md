@@ -85,6 +85,33 @@ The JSON report includes:
 
 Audit and training mode emit audit records instead of the normal scan report.
 
+## MCP / AI-agent config secrets
+
+The `mcp_configs` category detects hardcoded, plaintext secrets in local
+MCP (Model Context Protocol) / AI-agent configuration files — the config that
+AI coding assistants use to wire up tool servers, and a common place for
+long-lived API keys and PATs to end up in cleartext.
+
+It looks at Claude Desktop, Claude Code (`~/.claude.json`, `.claude/settings*.json`),
+Cursor (`~/.cursor/mcp.json`, project `.cursor/mcp.json`), Cline/Roo (VS Code
+globalStorage), Windsurf, Continue, and VS Code MCP (`.vscode/mcp.json`,
+project `.mcp.json`). Inside each it inspects `env` blocks, `headers`
+(`Authorization: Bearer …`), and any credential-shaped key.
+
+Crucially, the **secure pattern is not a finding**: a value like
+`"GITHUB_TOKEN": "${GITHUB_TOKEN}"` (an env-var reference resolved at launch)
+or an `op://` reference is treated as target-state, not exposure. Only a
+**literal** secret value is reported. Clean configs are recorded as
+observations so you can measure how widely MCP tooling is in use, not just where
+it leaks.
+
+As with every other category, output contains **locations and classification
+reasons only — never the secret value**. Run it alone with:
+
+```bash
+python3 rattlesnake.py --category mcp_configs --pretty
+```
+
 ## A Note on 1Password References
 
 `rattlesnake` intentionally treats `op://...` values as non-secret references, not as exposed secrets.
