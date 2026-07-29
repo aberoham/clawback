@@ -1555,6 +1555,10 @@ MCP_HOME_CONFIGS = (
     ".codeium/windsurf/mcp_config.json",              # Windsurf
     ".continue/config.json",                          # Continue
     ".continue/config.yaml",                          # Continue (YAML variant)
+    "Library/Application Support/Code/User/mcp.json",             # VS Code (user profile)
+    "Library/Application Support/Code - Insiders/User/mcp.json",  # VS Code Insiders (user profile)
+    "Library/Application Support/VSCodium/User/mcp.json",         # VSCodium (user profile)
+    "Library/Application Support/Cursor/User/mcp.json",           # Cursor (user profile)
 )
 
 # VS Code-family globalStorage roots that may hold Cline/Roo MCP settings.
@@ -1571,12 +1575,20 @@ MCP_PROJECT_FILENAMES = frozenset({".mcp.json", "mcp.json"})
 # Hidden dirs we DO descend into (normally pruned) — MCP configs live here.
 MCP_KEEP_HIDDEN_DIRS = frozenset({".cursor", ".vscode", ".claude"})
 
-# Key names (case-insensitive, - and _ folded) that denote credential material.
+# Normalized credential key names (lowercased, all separators stripped).
 MCP_SECRET_KEY_NAMES = frozenset({
-    "apikey", "api_key", "token", "access_token", "accesstoken",
-    "password", "passwd", "secret", "client_secret", "authorization",
-    "auth", "bearer", "key", "private_key", "apitoken",
+    "apikey", "apitoken", "token", "accesstoken", "password", "passwd",
+    "secret", "clientsecret", "authorization", "auth", "bearer", "key",
+    "privatekey", "accesskey", "accesskeyid", "secretaccesskey", "secretkey",
+    "passphrase", "credential", "credentials", "connectionstring", "dsn",
+    "githubtoken", "gitlabtoken", "slacktoken", "pat",
 })
+# Unambiguous credential substrings: if a NORMALIZED key contains one, it is
+# credential-shaped even in camelCase / prefixed forms (clientSecret, githubToken).
+MCP_SECRET_KEY_SUBSTRINGS = (
+    "secret", "password", "passwd", "passphrase", "credential",
+    "apikey", "privatekey", "accesskey",
+)
 
 # Prefixes that make an MCP literal secret CRITICAL (cloud / SCM / prod scope).
 MCP_CRITICAL_PREFIXES = frozenset({
@@ -1611,10 +1623,24 @@ def _mcp_tool_label(path: pathlib.Path) -> str:
     return "MCP (generic)"
 
 
+def _normalize_key(key: str) -> str:
+    """Lowercase and strip all non-alphanumerics (so client_secret, clientSecret
+    and client-secret all collapse to the same token)."""
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
 def _mcp_key_looks_secret(key: str) -> bool:
-    folded = key.lower().replace("-", "_")
-    if folded in MCP_SECRET_KEY_NAMES:
+    norm = _normalize_key(key)
+    if norm in MCP_SECRET_KEY_NAMES:
         return True
+    if any(sub in norm for sub in MCP_SECRET_KEY_SUBSTRINGS):
+        return True
+    # camelCase / separated "...Token" / "...ApiKey" style keys (githubToken, gh_token).
+    if norm.endswith("token") or norm.endswith("apikey"):
+        return True
+    # Screaming-snake env-var names (GITHUB_TOKEN, DATABASE_PASSWORD): match the
+    # shared generic pattern on the RAW key only — matching key.upper() here would
+    # over-flag any key merely CONTAINING "token" (e.g. claudeCodeFirstTokenDate).
     return bool(GENERIC_SECRET_RE.fullmatch(key))
 
 
@@ -1697,6 +1723,29 @@ def _classify_mcp_value(
     return ("none", reason)
 
 
+def _iter_yaml_scalars(content: str):
+    """Yield (key, value) for simple `key: value` scalar lines in a YAML/text
+    config (e.g. .continue/config.yaml) or truncated JSON. Best-effort and
+    stdlib-only — nesting is not resolved because the key-aware + prefix
+    classification catches credential/env keys regardless of depth."""
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):          # list item: "- key: value"
+            line = line[2:].strip()
+        m = re.match(r'^["\']?([A-Za-z_][\w.\-]*)["\']?\s*:\s*(\S.*)$', line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        # Strip a trailing inline comment only when the value is not quoted.
+        if value[:1] not in ("'", '"') and " #" in value:
+            value = value.split(" #", 1)[0].strip()
+        value = _strip_quotes(value)
+        if value:
+            yield key, value
+
+
 def _scan_mcp_file(ctx: ScanContext, cat: str, path: pathlib.Path) -> None:
     content = safe_read(path, MCP_FILE_READ_BYTES)
     if not content or not content.strip():
@@ -1736,16 +1785,30 @@ def _scan_mcp_file(ctx: ScanContext, cat: str, path: pathlib.Path) -> None:
                     "severity": _mcp_severity(reason).value,
                 })
     else:
-        # Truncated JSON or YAML: fall back to prefix presence (no values).
-        for prefix in KNOWN_SECRET_PREFIXES:
-            if prefix in content:
+        # Non-JSON (YAML, e.g. .continue/config.yaml) or truncated JSON.
+        # Extract key:value scalars and classify value/key-aware. Prefix
+        # matching is applied to the START of an extracted VALUE only — never
+        # as a substring of the whole file (that flagged `name: task-runner`
+        # as a `sk-` secret).
+        for key, value in _iter_yaml_scalars(content):
+            in_auth = key.lower() in ("authorization", "bearer")
+            relevant = (
+                in_auth
+                or _mcp_key_looks_secret(key)
+                or _first_known_prefix(value) is not None
+            )
+            if not relevant:
+                continue
+            kind, reason = _classify_mcp_value(key, value, in_auth)
+            if kind == "ref":
+                ref_count += 1
+            elif kind == "literal":
                 literals.append({
-                    "location": "raw_match",
-                    "key": "unknown",
-                    "reason": f"raw_prefix:{prefix}",
-                    "severity": _mcp_severity(f"raw_prefix:{prefix}").value,
+                    "location": key,
+                    "key": key,
+                    "reason": reason,
+                    "severity": _mcp_severity(reason).value,
                 })
-        ref_count += len(re.findall(r"\$\{[A-Za-z_]", content))
 
     if literals:
         severity = _max_severity([l["severity"] for l in literals])
