@@ -2340,6 +2340,8 @@ def _iter_lockfile_entries(
         for pkg_path, meta in (packages or {}).items():
             if not isinstance(meta, dict):
                 continue
+            if pkg_path == "":
+                continue
             real = meta.get("name")
             pkg = str(real) if real else str(pkg_path).split("node_modules/")[-1]
             version = meta.get("version")
@@ -3595,8 +3597,10 @@ def load_ioc_file(path: str) -> Tuple[Dict[str, Tuple[str, ...]], Optional[str]]
             rejected.append(str(name))
             continue
         cleaned = tuple(
-            str(v) for v in versions if isinstance(v, (str, int, float))
+            str(v).strip() for v in versions if isinstance(v, (str, int, float))
         )
+        # Drop empty strings after stripping (e.g. "  ").
+        cleaned = tuple(v for v in cleaned if v)
         if not cleaned:
             rejected.append(str(name))
             continue

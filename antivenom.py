@@ -2510,13 +2510,13 @@ def compile_claude_launcher(
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "",
-        f'cd "{unit.root_path}"',
+        f"cd {shlex.quote(unit.root_path)}",
         "",
-        f'cat "{task_path}"',
+        f"cat {shlex.quote(task_path)}",
         "echo ''",
         "read -r -p 'Press Enter to start Claude Code in plan mode...'",
         "",
-        f'exec claude --permission-mode plan "$(cat "{task_path}")"',
+        f"exec claude --permission-mode plan \"$(cat {shlex.quote(task_path)})\"",
         "",
     ]
     return "\n".join(lines)
@@ -2532,10 +2532,10 @@ def compile_codex_launcher(
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "",
-        f'cd "{unit.root_path}"',
+        f"cd {shlex.quote(unit.root_path)}",
         "",
         "echo 'Review and run (approximate Codex equivalent):'",
-        f'echo \'codex -p "$(cat "{task_path}")"\'',
+        f"echo 'codex -p \"$(cat {shlex.quote(task_path)})\"'",
         "",
     ]
     return "\n".join(lines)

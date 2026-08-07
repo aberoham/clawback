@@ -852,11 +852,23 @@ class TestPackCompilation:
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
         sh = compile_claude_launcher(unit, "/tmp/pack")
         assert "#!/usr/bin/env bash" in sh
-        assert 'cd "/project"' in sh
+        assert "/project" in sh
         assert "claude --permission-mode plan" in sh
         assert "001-high-test.md" in sh
         assert "read -r -p" in sh
         assert "cat" in sh
+
+    def test_claude_launcher_escapes_injection(self):
+        import shlex
+
+        evil = '/tmp/evil"; rm -rf /; echo "'
+        unit = _make_work_unit(
+            [_env_finding("/project/.env", ["K"])], root_path=evil
+        )
+        sh = compile_claude_launcher(unit, "/tmp/pack")
+        # The path must be shell-quoted, not double-quoted bare.
+        assert shlex.quote(evil) in sh
+        assert 'cd "' + evil + '"' not in sh
 
     def test_codex_launcher_content(self):
         unit = _make_work_unit([_env_finding("/project/.env", ["K"])])
