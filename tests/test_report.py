@@ -12,8 +12,23 @@ class TestBuildReport:
             "python_version", "timestamp", "scan_duration_seconds",
             "findings", "observations", "summary", "total_findings",
             "op_cli_available", "errors",
+            # Added so a consumer can tell an absent finding from an unscanned
+            # category; antivenom refuses to emit rotation launchers when
+            # persistence was not covered.
+            "scan_scope",
         }
         assert set(report.keys()) == required
+
+    def test_scan_scope_shape(self, scan_ctx):
+        report = build_report(scan_ctx)
+        scope = report["scan_scope"]
+
+        assert isinstance(scope["categories_scanned"], list)
+        assert isinstance(scope["categories_available"], list)
+        assert isinstance(scope["complete"], bool)
+        # build_report() alone runs no scanners, so nothing is covered yet.
+        assert scope["categories_scanned"] == []
+        assert scope["complete"] is False
 
     def test_summary_counts_match_findings(self, scan_ctx):
         scan_ctx.add("cat", "p", Severity.CRITICAL, "d", "r")

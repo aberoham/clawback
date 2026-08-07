@@ -33,6 +33,124 @@ In normal scan mode, `rattlesnake` reports actionable findings and separates the
 
 The JAMF extension attribute ("EA") line only summarizes findings, not observations.
 
+## Supply-Chain Compromise Detection
+
+Alongside "what is exposed here", `rattlesnake` answers a second question: "has
+something already stolen it?" The 2026-08 Shai-Hulud npm worm made that
+distinction concrete. It reached workstations through `keyv@6.0.0` and 450-odd
+other packages, but it did not stop at reading credentials off disk: it planted
+a watcher for persistence, committed loaders into `.claude/` and `.vscode/` so
+they ran without an `npm install`, and injected a CI workflow that dumped the
+whole Actions secret store into a build artifact.
+
+Four categories cover that ground:
+
+| Category | Looks for |
+|---|---|
+| `npm_supply_chain` | lockfiles pinning a known-malicious `package@version`; worm loaders and `preinstall` hooks inside installed copies of targeted packages |
+| `agent_autostart_hooks` | injected commands in AI-agent and IDE autostart surfaces (`.claude/settings.json` hooks, `.vscode/tasks.json` tasks) |
+| `repo_worm_artifacts` | loaders staged in `.claude/` and `.vscode/`, and CI workflows that serialise `toJSON(secrets)` to a file |
+| `malware_persistence` | the `gh-token-monitor` dead-man's switch, plus any LaunchAgent that persistently relaunches a bare script from a config or cache directory |
+
+Lockfile parsing covers npm only — v1's nested `dependencies` and v2/v3's
+`packages` map, plus `npm-shrinkwrap.json` — including both alias encodings.
+Yarn, pnpm and bun lockfiles are deliberately not parsed: a lockfile records
+*intent*, while `node_modules` records what actually landed on the machine,
+which is what decides whether a lifecycle hook ran. Installed packages are
+inspected thoroughly — nested trees, pnpm's virtual store, and global installs
+under nvm/n/volta — so those projects are covered once dependencies exist. A
+yarn/pnpm/bun project with no `node_modules` is reported as unverified rather
+than passed off as clean.
+
+Repository artifacts (staged loaders, injected CI workflows) are found by
+discovering repositories directly, not by following agent config files, so a
+workflow left behind *after* the hooks were removed is still caught.
+
+Three design notes worth keeping in mind when extending these:
+
+**Hashes, not filenames.** Every dropper check is gated on SHA-256. Matching on
+filename alone is not viable: `regenerate-unicode-properties` ships a
+legitimate `General_Category/Math_Symbol.js` and `motion-dom` ships a
+legitimate `setup.mjs`, so a name-based rule fires on a large share of healthy
+JS projects.
+
+**Only executable fields.** The hook scanner parses JSON structure and reads
+just the fields that actually execute, so security tooling whose
+`permissions.deny` list legitimately blocks `curl ... | bash` is not mistaken
+for the thing it defends against.
+
+**Nothing is skipped silently.** A lockfile or manifest that cannot be read or
+parsed, a file too large to hash, and a discovery walk that hits its budget all
+land in `scan_scope.coverage_gaps`. On a scanner whose whole purpose is to
+answer "am I compromised", an unscanned file that reports nothing is
+indistinguishable from a clean one, so it has to say so. Gaps are kept separate
+from `errors` because `errors` sets exit code 2: an inaccessible directory is a
+coverage gap on a healthy host, not a malfunction. Discovery is bounded by a
+directory count and a wall-clock budget as well as a prune list, since a prune
+list is always incomplete — one database storage directory (`~/.dolt`) cost 74
+seconds for three directories during testing.
+
+### Tracking a live campaign with `--ioc-file`
+
+The built-in list carries the directly-compromised core plus notable
+second-generation packages. A live campaign's tail is far longer than is
+sensible to embed — this one passed 450 packages and 2,200 versions while still
+spreading — so the current list can be supplied at scan time:
+
+```bash
+python3 rattlesnake.py --quiet --ioc-file iocs.json
+```
+
+The file is `{"packages": {"name": ["1.2.3", "1.2.4"]}}`. Published vendor
+feeds convert in one step; for example, from Wiz's IoC CSV:
+
+```bash
+python3 -c 'import csv,json,sys; print(json.dumps({"packages":{r["Package"]:[v.strip() for v in r["Malicious Versions"].split(",") if v.strip()] for r in csv.DictReader(open(sys.argv[1]))}}))' \
+  keyv-packages.csv > iocs.json
+```
+
+A malformed or missing feed is reported in the report's `errors` list and the
+rest of the scan still runs, so a bad push cannot blind a fleet. A feed that
+parses but yields no usable entries is an error too, rather than a silent
+success.
+
+### If a finding fires, order matters — and antivenom enforces it
+
+The persistence watcher polls GitHub every 60 seconds and runs a
+remote-supplied command as soon as the stolen token stops working. **Remove the
+watcher before revoking any token.** Revoking first is the trigger, and the
+equivalent handler in the leaked framework this payload derives from ran
+`rm -rf ~/`. Note also that valid SLSA provenance and a green
+GitHub-verified badge were present on the malicious releases — verify against
+hashes, not attestations.
+
+Because that ordering is the opposite of normal credential-leak advice, it is
+not left to whoever reads the report. When a scan contains a
+`malware_persistence` finding, `antivenom` treats the whole pack as
+rotation-gated:
+
+- `index.md` opens with a stop notice naming the offending paths and the
+  correct three-step order;
+- **no agent launchers are generated at all** — not just for the malware
+  finding, but for every unit in the pack, because nearly every automated
+  remediation task rotates or revokes something;
+- any launchers left in a reused `--output-dir` from an earlier ungated run are
+  deleted, so a stale rotation script cannot still be sitting there;
+- `--category` cannot lift the gate: it is decided from the unfiltered report,
+  so filtering the persistence finding out of the pack does not un-gate it;
+- `--tmux` refuses to start sessions.
+
+The generated incident-response task carries the shutdown steps for **both**
+macOS and Linux (`launchctl bootout`, `systemctl --user disable`, `loginctl
+disable-linger`) plus deletion of the watcher's files, ahead of any rotation
+step, and preserves the scanner's own per-finding remediation text.
+
+Task files are still written, so an operator has the instructions. Removing the
+watcher and re-scanning lifts the gate and launchers reappear. The four
+compromise categories are additionally mapped to `incident_response`, so they
+are human-only regardless of the gate — an autonomous agent should never be
+pointed at live malware.
+
 ## Audit and Train Modes
 
 Audit mode is for heuristic tuning, where `rattlesnake` emits metadata about found variables without bothering with classification. Training mode is audit mode extended with anonymized output, useful for "autoresearch" style aggregation and classifier refinement. We aim to have zero false positives and no false negatives -- the noise must be squelched!
