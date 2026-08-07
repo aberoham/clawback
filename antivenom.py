@@ -22,7 +22,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 VERSION = "0.2.0"
 
@@ -96,7 +96,23 @@ FIX_TYPE_MAP: Dict[str, str] = {
     "kubernetes": "kubeconfig_migrate",
     "crypto_wallets": "wallet_secure",
     "teampcp_ioc": "incident_response",
+    # Active-compromise categories are human-first. A lockfile pinning a
+    # malicious version means the payload almost certainly executed on
+    # install, so none of these are "fix the config" work an agent should be
+    # pointed at unattended.
+    "npm_supply_chain": "incident_response",
+    "agent_autostart_hooks": "incident_response",
+    "repo_worm_artifacts": "incident_response",
+    "malware_persistence": "incident_response",
 }
+
+# Categories indicating a watcher whose handler fires *on revocation*, which
+# inverts the safe order of remediation. Scoped deliberately: teampcp_ioc is
+# also persistence, but that campaign's switch was not revocation-triggered,
+# and its established pack behaviour is left unchanged.
+LIVE_PERSISTENCE_CATEGORIES = frozenset({
+    "malware_persistence",
+})
 
 GUIDE_MAP: Dict[str, str] = {
     "env_files": "shell-env-secrets.md",
@@ -317,6 +333,12 @@ def normalize_finding(raw: Dict[str, Any]) -> NormalizedFinding:
         fix_type=FIX_TYPE_MAP.get(category, "generic"),
         details=details,
     )
+
+    # A medium, non-campaign persistence finding is a "verify this login item"
+    # request, not an incident. Leave it on the generic path so it keeps its
+    # own severity and remediation instead of becoming a rebuild-the-host task.
+    if _is_generic_persistence(nf):
+        nf.fix_type = "verify_login_item"
 
     if "variable" in details:
         nf.variable = details["variable"]
@@ -1835,11 +1857,72 @@ def _compile_verification_tail(
 def compile_task_file(
     unit: WorkUnit,
     pack_path: Optional[str] = None,
+    pack_gated: bool = False,
+    scan_incomplete: bool = False,
 ) -> str:
     """Compile a WorkUnit into a complete agent-ready task file."""
-    if all(nf.fix_type == "incident_response" for nf in unit.findings):
-        return _compile_incident_response_task(unit)
+    # Must use the same predicate the launcher decision uses. While this was
+    # `all(...)` and _is_incident_response() was `any(...)`, a unit holding a
+    # persistence finding plus an ordinary finding was correctly marked
+    # human-only but still compiled through the generic path -- producing a
+    # task with no watcher-shutdown section and a bare "rotate ALL
+    # credentials" step, i.e. exactly the ordering the gate exists to prevent.
+    if _is_incident_response(unit):
+        return _compile_incident_response_task(
+            unit, pack_gated=pack_gated, scan_incomplete=scan_incomplete,
+        )
 
+    if pack_gated:
+        # Persistence is a separate unit in this pack. index.md carries the
+        # pack-wide warning, but an operator who opens this task file directly
+        # would otherwise follow its revoke-first instructions.
+        return "\n".join(
+            _pack_gate_notice(scan_incomplete)
+            + [_compile_ordinary_task(unit, pack_path)]
+        )
+
+    return _compile_ordinary_task(unit, pack_path)
+
+
+def _pack_gate_notice(scan_incomplete: bool = False) -> List[str]:
+    """Stop-notice prepended to every task while the pack is rotation-gated.
+
+    The two gate reasons need different instructions. Telling an operator a
+    watcher "was found" and pointing at a persistence task that does not exist
+    — because the scan simply never looked — is both false and unactionable.
+    """
+    if scan_incomplete:
+        return [
+            "> ## ⛔ STOP — this scan did not check for malware persistence",
+            ">",
+            "> The report behind this pack was produced with a `--category` "
+            "filter, or its persistence scan hit an error, so it **cannot rule "
+            "out** a live `gh-token-monitor` watcher. That watcher's handler "
+            "fires when the stolen token stops working, so **any credential "
+            "rotation or revocation below must wait**.",
+            ">",
+            "> Run a full scan first: `python3 rattlesnake.py --pretty`. If it "
+            "reports no `malware_persistence` finding, regenerate this pack "
+            "and the launchers will reappear.",
+            "",
+        ]
+    return [
+        "> ## ⛔ STOP — malware persistence was found elsewhere on this host",
+        ">",
+        "> Another finding in this scan indicates a live `gh-token-monitor` "
+        "watcher. Its handler fires when the stolen token stops working, so "
+        "**any credential rotation or revocation below must wait** until that "
+        "watcher is removed. See the persistence task and `index.md` for the "
+        "shutdown steps, then re-scan before acting on this file.",
+        "",
+    ]
+
+
+def _compile_ordinary_task(
+    unit: WorkUnit,
+    pack_path: Optional[str] = None,
+) -> str:
+    """Compile the standard agent-ready task body for a non-IR unit."""
     lines = [
         f"# Task {unit.id} ({unit.severity} severity)",
         "",
@@ -1904,8 +1987,12 @@ def compile_task_file(
     return "\n".join(lines)
 
 
-def _compile_incident_response_task(unit: WorkUnit) -> str:
-    """Compile a task file for pure incident-response findings."""
+def _compile_incident_response_task(
+    unit: WorkUnit,
+    pack_gated: bool = False,
+    scan_incomplete: bool = False,
+) -> str:
+    """Compile a task file for incident-response findings."""
     lines = [
         f"# Task {unit.id} (CRITICAL)",
         "",
@@ -1919,6 +2006,66 @@ def _compile_incident_response_task(unit: WorkUnit) -> str:
     for nf in unit.findings:
         lines.append(f"- **`{nf.path}`**: {nf.description}")
 
+    # Watcher-specific shutdown steps belong only with watcher evidence.
+    # Keying on the category emitted gh-token-monitor deletion commands for
+    # someone's ordinary custom LaunchAgent.
+    persistence = [nf for nf in unit.findings if _is_watcher_finding(nf)]
+
+    # Show the shutdown block whenever the pack is gated, not only when this
+    # particular unit holds the watcher: an operator reading a compromised-npm
+    # task in a gated pack otherwise sees revoke-first instructions.
+    if pack_gated and not persistence:
+        lines.extend(_pack_gate_notice(scan_incomplete))
+
+    if persistence:
+        # The generic checklist below rotates credentials, which is the one
+        # thing that must not happen first when a watcher is live: its handler
+        # fires on revocation. Shutdown comes first, and covers Linux as well
+        # as macOS, plus deleting the watcher's files.
+        lines.extend([
+            "",
+            "## STOP — do this before ANY credential rotation",
+            "",
+            "A watcher planted by this campaign polls for its stolen token and "
+            "executes a remote-supplied command the moment that token stops "
+            "working. Revoking first is the trigger, and the equivalent "
+            "handler in the framework this payload derives from deleted the "
+            "user's home directory.",
+            "",
+            "1. **macOS** — unload the agent, then delete its plist:",
+            "   ```",
+            "   launchctl bootout gui/$(id -u)/com.user.gh-token-monitor "
+            "2>/dev/null \\",
+            "     || launchctl unload ~/Library/LaunchAgents/"
+            "com.user.gh-token-monitor.plist",
+            "   rm -f ~/Library/LaunchAgents/com.user.gh-token-monitor.plist",
+            "   ```",
+            "2. **Linux** — stop the user unit and drop lingering:",
+            "   ```",
+            "   systemctl --user disable --now gh-token-monitor.service",
+            "   loginctl disable-linger \"$USER\"",
+            "   rm -f ~/.config/systemd/user/gh-token-monitor.service",
+            "   ```",
+            "3. **Both** — delete the watcher payload and its state:",
+            "   ```",
+            "   rm -rf ~/.config/gh-token-monitor ~/.local/bin/"
+            "gh-token-monitor.sh",
+            "   rm -f /tmp/gh-token-monitor.out.log "
+            "/tmp/gh-token-monitor.err.log /tmp/tmp.dpkg_14527.lock",
+            "   ```",
+            "4. Remove any remaining path this scan flagged under "
+            "`malware_persistence` — the list below is authoritative, and a "
+            "leftover artefact keeps the pack gated:",
+        ])
+        for nf in persistence:
+            lines.append(f"   - `{nf.path}`")
+        lines.extend([
+            "5. Confirm it is gone: re-run rattlesnake and check that no "
+            "`malware_persistence` finding remains.",
+            "",
+            "Only once that is clean should you proceed to rotation below.",
+        ])
+
     lines.extend(
         [
             "",
@@ -1928,13 +2075,42 @@ def _compile_incident_response_task(unit: WorkUnit) -> str:
             "2. Stop suspicious processes: "
             "`sudo launchctl unload` any matching LaunchAgents.",
             "3. Preserve forensic evidence before cleanup.",
-            "4. **Rotate ALL credentials** that have ever been "
-            "present on this machine.",
-            "5. Rebuild from a clean image.",
-            "",
-            "Do not attempt automated remediation for these findings.",
         ]
     )
+    if persistence:
+        lines.append(
+            "4. **Rotate ALL credentials** that have ever been present on this "
+            "machine — *after* completing the shutdown steps above."
+        )
+    else:
+        lines.append(
+            "4. **Rotate ALL credentials** that have ever been "
+            "present on this machine."
+        )
+    lines.extend([
+        "5. Rebuild from a clean image.",
+        "",
+        "## Scanner remediation guidance",
+        "",
+    ])
+
+    # The per-finding remediation carries the specifics -- exact paths, the
+    # safe pin for a compromised package, the ordering warning. Dropping it in
+    # favour of the generic checklist lost all of that.
+    seen_remediation = set()
+    for nf in unit.findings:
+        text = (nf.remediation or "").strip()
+        if not text or text in seen_remediation:
+            continue
+        seen_remediation.add(text)
+        lines.append(f"- **`{nf.path}`**: {text}")
+    if not seen_remediation:
+        lines.append("- (none provided by the scanner)")
+
+    lines.extend([
+        "",
+        "Do not attempt automated remediation for these findings.",
+    ])
 
     return "\n".join(lines)
 
@@ -1942,7 +2118,7 @@ def _compile_incident_response_task(unit: WorkUnit) -> str:
 # ── Pack compilation ─────────────────────────────────────────────────
 
 
-def _render_index_entry(unit: WorkUnit) -> List[str]:
+def _render_index_entry(unit: WorkUnit, gated: bool = False) -> List[str]:
     """Render a single work unit as an index checklist entry."""
     lines: List[str] = []
     is_ir = _is_incident_response(unit)
@@ -1964,6 +2140,11 @@ def _render_index_entry(unit: WorkUnit) -> List[str]:
 
     if is_ir:
         lines.append("  - **Human-only — no agent launcher**")
+    elif gated:
+        lines.append(
+            "  - **Launcher withheld — clear the persistence findings first "
+            "(see the stop notice above)**"
+        )
     else:
         launch_rel = f"launch/{unit.id}-claude.sh"
         lines.append(f"  - Launch: `bash {launch_rel}`")
@@ -1996,10 +2177,13 @@ def compile_index(
         "",
         f"Generated by antivenom v{VERSION}",
         "",
+    ]
+    lines.extend(_gate_banner(units, report_data))
+    lines.extend([
         "## Scan Summary",
         "",
         f"- **Total findings:** {total}",
-    ]
+    ])
 
     sev_parts = []
     for sev in ("critical", "high", "medium", "low"):
@@ -2028,8 +2212,9 @@ def compile_index(
         ]
     )
 
+    gated = is_rotation_gated(units, report_data)
     for unit in units:
-        lines.extend(_render_index_entry(unit))
+        lines.extend(_render_index_entry(unit, gated))
 
     return "\n".join(lines)
 
@@ -2096,9 +2281,218 @@ def compile_metadata(
     return "\n".join(lines)
 
 
+def _is_generic_persistence(nf: NormalizedFinding) -> bool:
+    """A persistence finding that only needs operator verification.
+
+    The scanner deliberately emits a medium, non-campaign malware_persistence
+    finding for an ordinary KeepAlive script. Mapping the whole category to
+    incident_response turned that into a CRITICAL task demanding isolation,
+    rotation of every credential and a clean rebuild — wildly out of
+    proportion to "check whether this login item is yours".
+    """
+    return (
+        nf.category in LIVE_PERSISTENCE_CATEGORIES
+        and not _is_watcher_finding(nf)
+        and nf.severity in ("medium", "low")
+    )
+
+
 def _is_incident_response(unit: WorkUnit) -> bool:
-    """True when the work unit is purely incident response."""
-    return all(nf.fix_type == "incident_response" for nf in unit.findings)
+    """True when the unit contains ANY incident-response finding.
+
+    Deliberately `any`, not `all`. Grouping is by repository, so an
+    active-compromise finding and an ordinary .env finding in the same
+    checkout land in one unit; requiring every member to be incident response
+    handed that unit an agent launcher and defeated the human-only rule for
+    the compromise categories.
+    """
+    return any(nf.fix_type == "incident_response" for nf in unit.findings)
+
+
+def persistence_scan_incomplete(report_data: Dict[str, Any]) -> bool:
+    """Whether the report cannot vouch for the absence of a watcher.
+
+    A report from `rattlesnake --category package_manager_tokens` contains no
+    watcher finding *and* no sign that persistence was never examined, so the
+    gate read it as "safe" and emitted a token-revocation launcher. Absence of
+    evidence is not evidence of absence: if the persistence categories were not
+    scanned successfully, rotation stays gated.
+    """
+    if not isinstance(report_data, dict):
+        return True
+
+    scope = report_data.get("scan_scope")
+    if not isinstance(scope, dict):
+        # Older reports predate scan_scope. Treat a report that carries no
+        # scope at all as trustworthy only when it looks like a full scan.
+        return False
+
+    scanned = scope.get("categories_scanned")
+    if not isinstance(scanned, list):
+        return True
+    if not LIVE_PERSISTENCE_CATEGORIES.issubset(set(scanned)):
+        return True
+
+    # A category can complete while still failing on individual files -- one
+    # unreadable or unparseable LaunchAgent, say. Set membership alone called
+    # that conclusive, so the gate lifted despite an uninspected persistence
+    # definition. Coverage gaps carry those; `errors` carries scanner faults.
+    entries = list(report_data.get("errors") or [])
+    entries.extend(scope.get("coverage_gaps") or [])
+    for entry in entries:
+        text = str(entry)
+        if any(text.startswith(f"{cat}:") for cat in LIVE_PERSISTENCE_CATEGORIES):
+            return True
+    return False
+
+
+def report_has_live_persistence(report_data: Dict[str, Any]) -> bool:
+    """Whether the *unfiltered* report contains a persistence finding.
+
+    The gate must be decided from the raw report, not from work units: with
+    `--category package_manager_tokens` the watcher is filtered out before
+    units are built, which silently un-gated the pack and emitted exactly the
+    credential-rotation launcher that must not run.
+    """
+    for raw in (report_data or {}).get("findings") or []:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("category") not in LIVE_PERSISTENCE_CATEGORIES:
+            continue
+        details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        if str(details.get("campaign", "")) in WATCHER_CAMPAIGNS:
+            return True
+        haystack = (
+            f"{raw.get('path', '')} {raw.get('description', '')} "
+            f"{details.get('program', '')}"
+        ).lower()
+        if any(marker in haystack for marker in WATCHER_PATH_MARKERS):
+            return True
+    return False
+
+
+# A dead-man's switch is what makes revocation dangerous. The scanner also
+# emits medium malware_persistence findings from a generic heuristic (any
+# KeepAlive script under a config directory), and treating those as the watcher
+# withheld every launcher and printed watcher-specific deletion steps for
+# someone's ordinary custom LaunchAgent. Gate on campaign evidence instead.
+WATCHER_PATH_MARKERS = ("gh-token-monitor", "tmp.dpkg_14527.lock")
+WATCHER_CAMPAIGNS = ("shai-hulud-2026-08",)
+
+
+def _is_watcher_finding(nf: NormalizedFinding) -> bool:
+    """Whether a finding is evidence of a revocation-triggered watcher."""
+    if nf.category not in LIVE_PERSISTENCE_CATEGORIES:
+        return False
+
+    details = nf.details if isinstance(nf.details, dict) else {}
+    if str(details.get("campaign", "")) in WATCHER_CAMPAIGNS:
+        return True
+
+    haystack = f"{nf.path} {nf.description} {details.get('program', '')}".lower()
+    return any(marker in haystack for marker in WATCHER_PATH_MARKERS)
+
+
+def live_persistence_findings(units: List[WorkUnit]) -> List[NormalizedFinding]:
+    """Findings that evidence a revocation-triggered watcher."""
+    out: List[NormalizedFinding] = []
+    for unit in units:
+        for nf in unit.findings:
+            if _is_watcher_finding(nf):
+                out.append(nf)
+    return out
+
+
+def is_rotation_gated(
+    units: List[WorkUnit],
+    report_data: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when automated remediation must be withheld pack-wide.
+
+    Malware persistence changes the safe order of operations. The 2026-08
+    Shai-Hulud watcher polls GitHub every 60 seconds and runs a
+    remote-supplied command as soon as the stolen token stops working, and
+    the equivalent handler in the framework it derives from deleted the
+    user's home directory. Credential rotation is therefore not a safe first
+    step -- it is the trigger.
+
+    Most launchable work in a pack rotates or revokes something, so while a
+    live watcher is present no launchers are generated at all. Removing the
+    watcher and re-running the scan clears the gate.
+
+    When the raw report is available it is authoritative, so that a
+    `--category` filter cannot hide the watcher and un-gate the pack.
+    """
+    if report_data is not None:
+        if report_has_live_persistence(report_data):
+            return True
+        if persistence_scan_incomplete(report_data):
+            return True
+    return bool(live_persistence_findings(units))
+
+
+def _gate_banner(
+    units: List[WorkUnit],
+    report_data: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Stop-banner for index.md when automated remediation is withheld."""
+    if not is_rotation_gated(units, report_data):
+        return []
+
+    findings = live_persistence_findings(units)
+    lines = [
+        "> ## ⛔ STOP — read before touching any credential",
+        ">",
+        "> This scan found evidence that **malware persistence may still be "
+        "running on this host**:",
+        ">",
+    ]
+    if findings:
+        for nf in findings[:10]:
+            lines.append(f"> - `{nf.path}` — {nf.description}")
+        if len(findings) > 10:
+            lines.append(f"> - ...and {len(findings) - 10} more")
+    elif persistence_scan_incomplete(report_data or {}):
+        lines.append(
+            "> - **This scan did not cover malware persistence**, so it cannot "
+            "rule out a live watcher. Re-run rattlesnake without "
+            "`--category` and confirm no `malware_persistence` finding before "
+            "rotating anything."
+        )
+    else:
+        # Gated from the raw report while a --category filter excluded the
+        # finding itself, so there is nothing to list here.
+        for raw in (report_data or {}).get("findings") or []:
+            if isinstance(raw, dict) and raw.get("category") in LIVE_PERSISTENCE_CATEGORIES:
+                lines.append(
+                    f"> - `{raw.get('path')}` — {raw.get('description')}"
+                )
+        lines.append(
+            "> - (excluded from this pack by --category; the finding is in "
+            "the full report)"
+        )
+    lines.extend([
+        ">",
+        "> **Do not rotate or revoke any credential yet.** A watcher of this "
+        "kind fires *on revocation*: it polls for the stolen token and "
+        "executes a remote-supplied command the moment that token stops "
+        "working. The equivalent handler in the framework this tradecraft "
+        "derives from deleted the user's home directory.",
+        ">",
+        "> Correct order:",
+        ">",
+        "> 1. Unload the LaunchAgent / disable the systemd user unit "
+        "(`loginctl disable-linger`) and delete the watcher files.",
+        "> 2. Re-run rattlesnake and confirm these findings are gone.",
+        "> 3. *Then* revoke tokens and rotate credentials.",
+        ">",
+        "> **No agent launchers have been generated for this pack.** Nearly "
+        "every automated task here rotates or revokes something, which is "
+        "exactly what must not happen first. Clear step 1, re-scan, and "
+        "antivenom will emit launchers normally.",
+        "",
+    ])
+    return lines
 
 
 def compile_claude_launcher(
@@ -2167,16 +2561,37 @@ def generate_pack(
     meta_content = compile_metadata(report_data, input_path)
     (pack / "metadata.md").write_text(meta_content + "\n", encoding="utf-8")
 
+    # A live persistence watcher makes credential rotation unsafe as a first
+    # step, and nearly every launchable task rotates something -- so the pack
+    # ships without launchers until the watcher is cleared. Decided from the
+    # raw report so a --category filter cannot hide the watcher.
+    gated = is_rotation_gated(units, report_data)
+    incomplete = persistence_scan_incomplete(report_data or {})
+
+    # Always clear launchers before writing, not only when gated. --output-dir
+    # may point at an earlier pack, and a unit that has become human-only
+    # (any incident-response finding) reuses the same generated ID -- so
+    # skipping the write left the previous executable launcher in place and
+    # broke the human-only guarantee.
+    _clear_launchers(ctx_dir=launch_dir)
+    # Stale task files matter for the same reason: unit renumbering between
+    # runs leaves orphans behind, and an obsolete task still carries
+    # revoke-first instructions without the current stop notice.
+    _clear_stale_tasks(tasks_dir, {f"{unit.id}.md" for unit in units})
+
     for unit in units:
         task_filename = f"{unit.id}.md"
         task_path = tasks_dir / task_filename
         task_path.write_text(
-            compile_task_file(unit, pack_path=str(pack)) + "\n",
+            compile_task_file(
+                unit, pack_path=str(pack), pack_gated=gated,
+                scan_incomplete=incomplete,
+            ) + "\n",
             encoding="utf-8",
         )
 
         # Incident-response units are human-only: no launchers.
-        if _is_incident_response(unit):
+        if _is_incident_response(unit) or gated:
             continue
 
         claude_path = launch_dir / f"{unit.id}-claude.sh"
@@ -2193,6 +2608,68 @@ def generate_pack(
     (pack / "index.md").write_text(index_content + "\n", encoding="utf-8")
 
     return str(pack)
+
+
+def _clear_stale_tasks(tasks_dir: pathlib.Path, keep: Set[str]) -> None:
+    """Delete task files in a reused pack that this run will not rewrite.
+
+    Fatal on failure, for the same reason stale launchers are: a task file is
+    an independent operator entry point, and an obsolete one can carry
+    revoke-first instructions without the current stop notice.
+    """
+    try:
+        existing = list(tasks_dir.glob("*.md"))
+    except OSError as exc:
+        _fatal(f"cannot inspect {tasks_dir} to clear stale tasks: {exc}")
+        return
+
+    survivors: List[str] = []
+    for task in existing:
+        if task.name in keep:
+            continue
+        try:
+            task.unlink()
+        except OSError as exc:
+            survivors.append(f"{task} ({exc})")
+
+    if survivors:
+        _fatal(
+            "refusing to generate a pack while stale task files remain: "
+            + "; ".join(survivors)
+            + ". Remove them by hand, then re-run: an obsolete task can "
+            "instruct the operator to rotate credentials first."
+        )
+
+
+def _clear_launchers(ctx_dir: pathlib.Path) -> None:
+    """Delete any launcher scripts left in a reused pack directory.
+
+    Fatal on failure. A launcher that survives -- because of ACLs, an
+    immutable flag, or directory permissions -- is an executable
+    credential-rotation script sitting in a pack whose index.md states there
+    are none. Continuing with a warning left that contradiction on disk, so
+    generation stops instead.
+    """
+    try:
+        stale = list(ctx_dir.glob("*.sh"))
+    except OSError as exc:
+        _fatal(f"cannot inspect {ctx_dir} to clear stale launchers: {exc}")
+        return
+
+    survivors: List[str] = []
+    for script in stale:
+        try:
+            script.unlink()
+        except OSError as exc:
+            survivors.append(f"{script} ({exc})")
+
+    if survivors:
+        _fatal(
+            "refusing to generate a pack while stale launchers remain: "
+            + "; ".join(survivors)
+            + ". Remove them by hand, then re-run: an executable "
+            "rotation script must not survive in a pack that reports none."
+        )
 
 
 def default_pack_dir() -> str:
@@ -2237,12 +2714,30 @@ def create_tmux_session(
     units: List[WorkUnit],
     pack_path: str,
     session_name: str,
+    report_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Create a tmux session with one window per launchable task.
 
     Each window displays the task prompt and waits for the operator
     to press Enter before starting Claude Code in plan mode.
     """
+    if is_rotation_gated(units, report_data):
+        print(
+            red(
+                "Refusing to start agent sessions: this scan found malware "
+                "persistence that may still be running."
+            ),
+            file=sys.stderr,
+        )
+        print(
+            yellow(
+                "Remove the watcher and re-scan before rotating anything — "
+                "revocation is what triggers its handler. See index.md."
+            ),
+            file=sys.stderr,
+        )
+        return
+
     launchable = [u for u in units if not _is_incident_response(u)]
     if not launchable:
         print(
@@ -2353,6 +2848,7 @@ def print_pack_summary(
     findings: List[NormalizedFinding],
     op_available: bool,
     op_authenticated: bool,
+    report_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Print a concise summary to stderr after pack generation."""
     print("", file=sys.stderr)
@@ -2415,6 +2911,23 @@ def print_pack_summary(
             file=sys.stderr,
         )
 
+    if is_rotation_gated(units, report_data):
+        print("", file=sys.stderr)
+        print(
+            red("  ⛔ Malware persistence found — no launchers generated."),
+            file=sys.stderr,
+        )
+        print(
+            yellow(
+                "     Remove the watcher and re-scan BEFORE rotating any "
+                "credential: revocation triggers its handler."
+            ),
+            file=sys.stderr,
+        )
+        print(dim(f"     Details: {pack_path}/index.md"), file=sys.stderr)
+        print("", file=sys.stderr)
+        return
+
     launchable = [u for u in units if not _is_incident_response(u)]
     if launchable:
         print("", file=sys.stderr)
@@ -2433,22 +2946,39 @@ def print_pack_summary(
 # ── Legacy combined mode ─────────────────────────────────────────────
 
 
-def write_combined(units: List[WorkUnit]) -> None:
-    """Write all task files as one combined markdown document."""
+def write_combined(
+    units: List[WorkUnit],
+    report_data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write all task files as one combined markdown document.
+
+    Gated the same way as a generated pack: main() returns through here for
+    --combined without touching generate_pack(), so the gate has to be applied
+    independently.
+    """
+    gated = is_rotation_gated(units, report_data)
+    incomplete = persistence_scan_incomplete(report_data or {})
+
     parts = [
         "# Rattlesnake Remediation Prompts",
         "",
         f"Generated by antivenom v{VERSION}. "
         f"{len(units)} task(s) to address.",
         "",
+    ]
+    if gated:
+        parts.extend(_gate_banner(units, report_data))
+    parts.extend([
         "Work through each section in order.",
         "",
         "---",
         "",
-    ]
+    ])
 
     for unit in units:
-        parts.append(compile_task_file(unit))
+        parts.append(compile_task_file(
+            unit, pack_gated=gated, scan_incomplete=incomplete,
+        ))
         parts.append("")
         parts.append("---")
         parts.append("")
@@ -2513,7 +3043,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "Warning: --combined ignores --preview and --tmux.",
                 file=sys.stderr,
             )
-        write_combined(units)
+        write_combined(units, report_data=data)
         return 0
 
     # Pack generation (default)
@@ -2521,14 +3051,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pack_path = generate_pack(units, data, output_dir, input_path=args.input)
 
     # Summary
-    print_pack_summary(pack_path, units, findings, op_available, op_authenticated)
+    print_pack_summary(
+        pack_path, units, findings, op_available, op_authenticated,
+        report_data=data,
+    )
 
     if args.preview:
         print_preview(units)
 
     if args.tmux:
         session_name = f"antivenom-{pathlib.Path(pack_path).name}"
-        create_tmux_session(units, pack_path, session_name)
+        create_tmux_session(units, pack_path, session_name, report_data=data)
 
     return 0
 
