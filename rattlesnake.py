@@ -128,6 +128,21 @@ NAMED_SECRET_VARS = frozenset({
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 })
 
+# Template placeholders: Jinja/Go/Helm `{{ … }}`, ERB `<%= … %>`, and the
+# angle-bracket convention `<your-token-here>`. Shell-style `${…}` is handled
+# separately, since it also appears in genuine config values.
+TEMPLATE_PLACEHOLDER_RE = re.compile(
+    r"\{\{.*?\}\}|<%=?.*?%>|^<[^<>\s][^<>]*>$"
+)
+
+# Public cloud resource identifiers. These appear in dashboard URLs and in
+# every API call made *with* the accompanying token, so knowing one grants
+# nothing on its own -- but a 32-char hex ID trips the long-hex rule.
+RESOURCE_ID_NAME_RE = re.compile(
+    r"_(?:ACCOUNT|ZONE|SERVICE|KV|PROJECT|ORG|TENANT|SUBSCRIPTION|APP|CLIENT)?_?ID$"
+)
+_HEX_ONLY_RE = re.compile(r"^[0-9a-f]{16,64}$", re.IGNORECASE)
+
 # Tier 2: generic pattern for variable names that look like secrets.
 GENERIC_SECRET_RE = re.compile(
     r"[A-Z_]*(?:SECRET|TOKEN|PASSWORD|CREDENTIAL|AUTH_KEY|API_KEY|PRIVATE_KEY)"
@@ -632,6 +647,20 @@ def octal_permissions(path: pathlib.Path) -> Optional[str]:
         return None
 
 
+def group_or_world_accessible(path: pathlib.Path) -> Optional[bool]:
+    """Whether anyone other than the owner can reach a file.
+
+    Tests the permission bits that matter rather than comparing against an
+    exact mode: 0o400 and 0o000 are stricter than 0o600, not looser, and
+    reporting them as "overly permissive" inverts the operator's triage order
+    while advising a chmod that would loosen a correctly-protected file.
+    """
+    try:
+        return bool(stat.S_IMODE(path.stat().st_mode) & 0o077)
+    except OSError:
+        return None
+
+
 def run_cmd(args: List[str], timeout: int = 5) -> Optional[str]:
     try:
         result = subprocess.run(
@@ -688,6 +717,13 @@ def classify_value(value: str) -> Tuple[bool, str]:
     if stripped.startswith("op://"):
         return False, "1password_reference"
 
+    # Template placeholders are substituted at deploy time, so the file holds
+    # no secret material. Checked on the value rather than the filename: the
+    # naming conventions are many (.env.j2, .env.tmpl, templates/.env) and a
+    # filename-only rule keeps missing them.
+    if TEMPLATE_PLACEHOLDER_RE.search(stripped):
+        return False, "template_placeholder"
+
     # Shell variable expansion (e.g. $HOME/.nvm, /opt/foo:$PATH) is config,
     # not a secret. Must contain $ followed by a letter or brace.
     if re.search(r"\$[A-Za-z_{]", stripped):
@@ -705,8 +741,13 @@ def classify_value(value: str) -> Tuple[bool, str]:
     if re.match(r"\w+://[^:]+:[^@]+@", stripped):
         return True, "url_with_credentials"
 
-    # High entropy + sufficient length
-    if len(stripped) >= 20:
+    # High entropy + sufficient length. Values containing internal whitespace
+    # are excluded: a long command-line string scores highly on character
+    # variety alone (a JVM options list reaches 5.1), while credentials that
+    # this tier is meant to catch -- API keys, tokens, hashes, base64 blobs --
+    # are contiguous. A multi-word passphrase has low entropy and is caught by
+    # its variable name instead, so nothing real is lost here.
+    if len(stripped) >= 20 and not re.search(r"\s", stripped):
         ent = shannon_entropy(stripped)
         if ent > 4.5:
             return True, f"high_entropy:{ent:.1f}"
@@ -761,6 +802,20 @@ def _name_value_suspicious(raw_value: str) -> Tuple[bool, str]:
         return False, "word_like_value"
 
     return True, f"name_plus_value:{ent:.1f}"
+
+
+def is_public_resource_id(var_name: str, raw_value: str) -> bool:
+    """True for a public cloud resource identifier misread as a secret.
+
+    A 32-char hex Cloudflare zone ID or Fastly service ID satisfies the
+    long-hex structural rule, but appears in dashboard URLs and in every API
+    call made with the accompanying token, so it grants nothing alone. Both
+    halves are required: the name must end in an `_ID` form and the value must
+    be plain hex, which keeps `CLIENT_SECRET`-style variables untouched.
+    """
+    if not RESOURCE_ID_NAME_RE.search(var_name.upper()):
+        return False
+    return bool(_HEX_ONLY_RE.fullmatch(_strip_quotes(raw_value)))
 
 
 def _is_secret_locator(var_name: str, raw_value: str) -> bool:
@@ -1086,7 +1141,7 @@ def scan_ssh_keys(ctx: ScanContext, quiet: bool) -> None:
 
         encrypted = _check_ssh_key_encryption(entry, content)
         perms = octal_permissions(entry)
-        bad_perms = perms is not None and perms != "0o600"
+        bad_perms = group_or_world_accessible(entry) is True
         key_type = _detect_ssh_key_type(content)
 
         if not encrypted and bad_perms:
@@ -1115,11 +1170,17 @@ def scan_ssh_keys(ctx: ScanContext, quiet: bool) -> None:
             )
             continue
 
+        # Only advise a chmod when the mode is actually the problem: telling an
+        # operator to relax 0o400 to 0o600 would loosen a correct file.
+        remediation = "Add a passphrase: ssh-keygen -p -f <path>. "
+        if bad_perms:
+            remediation += "Restrict permissions: chmod 600 <path>. "
+        remediation += (
+            "Consider using macOS Keychain: ssh-add --apple-use-keychain."
+        )
+
         ctx.add(
-            cat, entry, severity, desc,
-            "Add a passphrase: ssh-keygen -p -f <path>. "
-            "Fix permissions: chmod 600 <path>. "
-            "Consider using macOS Keychain: ssh-add --apple-use-keychain.",
+            cat, entry, severity, desc, remediation,
             key_type=key_type,
             encrypted=encrypted,
             permissions=perms,
@@ -1527,6 +1588,8 @@ def scan_shell_profiles(ctx: ScanContext, quiet: bool) -> None:
                 continue
 
             val_hit, val_reason = classify_value(raw_value)
+            if val_hit and is_public_resource_id(var_name, raw_value):
+                val_hit, val_reason = False, "public_resource_id"
             locator_hit = _is_secret_locator(var_name, raw_value)
             if val_hit or locator_hit:
                 severity = (
@@ -1608,6 +1671,8 @@ def scan_environment_variables(ctx: ScanContext, quiet: bool) -> None:
             continue
 
         val_hit, val_reason = classify_value(var_value)
+        if val_hit and is_public_resource_id(var_name, var_value):
+            val_hit = False
         if val_hit:
             severity = (
                 Severity.HIGH
@@ -1705,9 +1770,16 @@ def _report_env_file(
     ctx: ScanContext, cat: str, path: pathlib.Path
 ) -> None:
     name_lower = path.name.lower()
-    is_template = any(
-        tag in name_lower
-        for tag in ("example", "sample", "template")
+    # Templating suffixes and a `templates/` ancestor are both common
+    # conventions that a filename-tag check alone misses. This is a secondary
+    # signal only: placeholder values are recognised by classify_value(), so a
+    # template is handled correctly even when nothing in its path says so.
+    is_template = (
+        any(tag in name_lower for tag in ("example", "sample", "template"))
+        or name_lower.endswith((".j2", ".jinja", ".jinja2", ".tmpl", ".tpl",
+                                ".erb", ".hbs", ".mustache", ".gotmpl"))
+        or any(part.lower() in ("templates", "template")
+               for part in path.parent.parts)
     )
 
     content = safe_read(path, ENV_FILE_READ_BYTES)
@@ -1723,6 +1795,8 @@ def _report_env_file(
         var_name, raw_value = parsed
 
         val_hit, val_reason = classify_value(raw_value)
+        if val_hit and is_public_resource_id(var_name, raw_value):
+            val_hit, val_reason = False, "public_resource_id"
         locator_hit = _is_secret_locator(var_name, raw_value)
         name_hit = (
             var_name in NAMED_SECRET_VARS
