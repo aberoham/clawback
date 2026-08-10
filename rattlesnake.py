@@ -131,15 +131,30 @@ NAMED_SECRET_VARS = frozenset({
 # Template placeholders: Jinja/Go/Helm `{{ … }}`, ERB `<%= … %>`, and the
 # angle-bracket convention `<your-token-here>`. Shell-style `${…}` is handled
 # separately, since it also appears in genuine config values.
+#
+# Anchored to the WHOLE value. An unanchored search exempts a value that mixes
+# a real credential with a placeholder -- `postgres://admin:hunter2@{{ host }}`
+# is a leaked password, not a template variable -- so only a value that is
+# entirely a placeholder qualifies.
 TEMPLATE_PLACEHOLDER_RE = re.compile(
-    r"\{\{.*?\}\}|<%=?.*?%>|^<[^<>\s][^<>]*>$"
+    r"^(?:\{\{[^{}]*\}\}|<%=?[^<>]*%>|<[^<>\s][^<>]*>)$"
 )
 
 # Public cloud resource identifiers. These appear in dashboard URLs and in
 # every API call made *with* the accompanying token, so knowing one grants
 # nothing on its own -- but a 32-char hex ID trips the long-hex rule.
+#
+# The resource category is REQUIRED, not optional. Matching any `*_ID` name
+# suppressed bearer credentials that happen to end that way: a hex SESSION_ID
+# or AUTH_ID is a live token, and SECRET_ID names the thing outright.
 RESOURCE_ID_NAME_RE = re.compile(
-    r"_(?:ACCOUNT|ZONE|SERVICE|KV|PROJECT|ORG|TENANT|SUBSCRIPTION|APP|CLIENT)?_?ID$"
+    r"_(?:ACCOUNT|ZONE|SERVICE|KV|PROJECT|ORG|TENANT|SUBSCRIPTION|"
+    r"DISTRIBUTION|BUCKET|WORKSPACE|CUSTOMER|APP|CLIENT)_ID$"
+)
+# Names that are credentials regardless of the suffix, so never suppressed.
+RESOURCE_ID_NEVER_SUPPRESS = (
+    "SECRET", "TOKEN", "SESSION", "AUTH", "PASSWORD", "KEY", "CREDENTIAL",
+    "PRIVATE", "SIGNATURE", "COOKIE", "BEARER", "REFRESH", "ACCESS",
 )
 _HEX_ONLY_RE = re.compile(r"^[0-9a-f]{16,64}$", re.IGNORECASE)
 
@@ -717,11 +732,11 @@ def classify_value(value: str) -> Tuple[bool, str]:
     if stripped.startswith("op://"):
         return False, "1password_reference"
 
-    # Template placeholders are substituted at deploy time, so the file holds
-    # no secret material. Checked on the value rather than the filename: the
-    # naming conventions are many (.env.j2, .env.tmpl, templates/.env) and a
-    # filename-only rule keeps missing them.
-    if TEMPLATE_PLACEHOLDER_RE.search(stripped):
+    # A value that is entirely a template placeholder is substituted at deploy
+    # time and holds no secret material. Checked on the value rather than the
+    # filename, since the naming conventions are many (.env.j2, .env.tmpl,
+    # templates/.env) and a filename-only rule keeps missing them.
+    if TEMPLATE_PLACEHOLDER_RE.fullmatch(stripped):
         return False, "template_placeholder"
 
     # Shell variable expansion (e.g. $HOME/.nvm, /opt/foo:$PATH) is config,
@@ -741,14 +756,22 @@ def classify_value(value: str) -> Tuple[bool, str]:
     if re.match(r"\w+://[^:]+:[^@]+@", stripped):
         return True, "url_with_credentials"
 
-    # High entropy + sufficient length. Values containing internal whitespace
-    # are excluded: a long command-line string scores highly on character
-    # variety alone (a JVM options list reaches 5.1), while credentials that
-    # this tier is meant to catch -- API keys, tokens, hashes, base64 blobs --
-    # are contiguous. A multi-word passphrase has low entropy and is caught by
-    # its variable name instead, so nothing real is lost here.
-    if len(stripped) >= 20 and not re.search(r"\s", stripped):
-        ent = shannon_entropy(stripped)
+    # High entropy + sufficient length.
+    #
+    # A whitespace-separated value is scored per token rather than whole. Two
+    # failure modes sit either side of this: scoring the whole string flags a
+    # JVM options list, which reaches 5.1 through character variety alone,
+    # while skipping such values entirely hides a credential embedded among
+    # ordinary flags (`-Xmx512m -Dservice.token=<secret>`). Each token is
+    # measured on its own, and a `flag=value` token is scored on the value.
+    for token in re.split(r"\s+", stripped) if re.search(r"\s", stripped) else [stripped]:
+        candidate = token
+        if "=" in candidate:
+            candidate = candidate.rsplit("=", 1)[1]
+        candidate = _strip_quotes(candidate)
+        if len(candidate) < 20:
+            continue
+        ent = shannon_entropy(candidate)
         if ent > 4.5:
             return True, f"high_entropy:{ent:.1f}"
 
@@ -813,7 +836,10 @@ def is_public_resource_id(var_name: str, raw_value: str) -> bool:
     halves are required: the name must end in an `_ID` form and the value must
     be plain hex, which keeps `CLIENT_SECRET`-style variables untouched.
     """
-    if not RESOURCE_ID_NAME_RE.search(var_name.upper()):
+    upper = var_name.upper()
+    if any(word in upper for word in RESOURCE_ID_NEVER_SUPPRESS):
+        return False
+    if not RESOURCE_ID_NAME_RE.search(upper):
         return False
     return bool(_HEX_ONLY_RE.fullmatch(_strip_quotes(raw_value)))
 

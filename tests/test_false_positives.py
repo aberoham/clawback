@@ -311,3 +311,121 @@ class TestTheReportedHostScenario:
         ))
 
         assert _env_findings(ctx) == []
+
+
+# -------------------------------------------------------------------
+# Boundaries: each false-positive fix above must not become a blind spot.
+# These pin the three false negatives found reviewing the fixes themselves.
+# -------------------------------------------------------------------
+
+
+class TestPlaceholderExemptionIsWholeValueOnly:
+    @pytest.mark.parametrize("value", [
+        "postgres://admin:hunter2@{{ db_host }}/app",
+        "mysql://root:letmein@{{ host }}:3306/db",
+        "https://user:pass@{{ domain }}/hook",
+    ])
+    def test_credential_mixed_with_a_placeholder_is_still_a_secret(self, value):
+        """A templated *host* does not make a hardcoded password benign."""
+        is_secret, reason = classify_value(value)
+
+        assert is_secret is True
+        assert reason != "template_placeholder"
+
+    def test_whole_value_placeholders_remain_exempt(self):
+        for value in ("{{ db_password }}", "{{db_password}}",
+                      "<%= ENV['SECRET'] %>", "<your-token-here>"):
+            is_secret, reason = classify_value(value)
+            assert is_secret is False, value
+            assert reason == "template_placeholder", value
+
+    def test_env_file_reports_the_mixed_credential(self, ctx):
+        _write_env(ctx, "Desktop/proj/.env.j2", (
+            "DB_PASSWORD={{ db_password }}\n"
+            "DATABASE_URL=postgres://admin:hunter2@{{ db_host }}/app\n"
+        ))
+
+        reported = _reported_vars(_env_findings(ctx))
+
+        assert "DATABASE_URL" in reported
+        assert "DB_PASSWORD" not in reported
+
+
+class TestResourceIdExemptionRequiresAKnownCategory:
+    @pytest.mark.parametrize("name", [
+        "SESSION_ID",      # a hex session ID is a bearer credential
+        "AUTH_ID",
+        "TOKEN_ID",
+        "SECRET_ID",
+        "ACCESS_ID",
+        "REFRESH_ID",
+        "COOKIE_ID",
+    ])
+    def test_credential_shaped_ids_are_never_suppressed(self, name):
+        assert is_public_resource_id(
+            name, "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+        ) is False
+
+    @pytest.mark.parametrize("name", [
+        "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "FASTLY_SERVICE_ID",
+        "GCP_PROJECT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_ID",
+        "AWS_DISTRIBUTION_ID", "CF_KV_ID",
+    ])
+    def test_known_public_identifiers_are_still_suppressed(self, name):
+        assert is_public_resource_id(
+            name, "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+        ) is True
+
+    def test_bare_id_suffix_is_not_enough(self):
+        """An unqualified *_ID gives no evidence that it is public."""
+        assert is_public_resource_id(
+            "THING_ID", "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+        ) is False
+
+    def test_session_id_is_reported_in_an_env_file(self, ctx):
+        _write_env(ctx, "Desktop/proj/.env", (
+            "CLOUDFLARE_ZONE_ID=f9e8d7c6b5a4938271605f4e3d2c1b0a\n"
+            "SESSION_ID=0a1b2c3d4e5f60718293a4b5c6d7e8f9\n"
+        ))
+
+        reported = _reported_vars(_env_findings(ctx))
+
+        assert "SESSION_ID" in reported
+        assert "CLOUDFLARE_ZONE_ID" not in reported
+
+
+class TestEntropyIsScoredPerToken:
+    def test_credential_embedded_among_flags_is_detected(self):
+        """Skipping whitespace values wholesale hid this."""
+        value = "-Xmx512m -Dservice.token=Zx9Qm4Lp7Rt2Wv8Kn3Yb6Hd1Fj5Gs0Ac"
+
+        is_secret, reason = classify_value(value)
+
+        assert is_secret is True
+        assert reason.startswith("high_entropy")
+
+    def test_quoted_embedded_credential_is_detected(self):
+        value = '--auth "Zx9Qm4Lp7Rt2Wv8Kn3Yb6Hd1Fj5Gs0Ac"'
+
+        is_secret, _ = classify_value(value)
+
+        assert is_secret is True
+
+    @pytest.mark.parametrize("value", [
+        # Every token is short or low-entropy, so nothing should fire.
+        ("-Xms64m -Xmx512m -XX:MetaspaceSize=96m -XX:+UseG1GC "
+         "-Djava.net.preferIPv4Stack=true -Dfile.encoding=UTF-8"),
+        "a quick brown fox jumped over the lazy dog repeatedly today",
+        "--flag one --flag two --another-flag three --and-more four",
+    ])
+    def test_ordinary_command_strings_stay_benign(self, value):
+        is_secret, _ = classify_value(value)
+
+        assert is_secret is False
+
+    def test_env_file_reports_the_embedded_credential(self, ctx):
+        _write_env(ctx, "Desktop/proj/.env", (
+            "JAVA_OPTS=-Xmx512m -Dservice.token=Zx9Qm4Lp7Rt2Wv8Kn3Yb6Hd1Fj5Gs0Ac\n"
+        ))
+
+        assert "JAVA_OPTS" in _reported_vars(_env_findings(ctx))
