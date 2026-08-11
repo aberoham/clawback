@@ -211,6 +211,30 @@ That means patterns like `AWS_ACCESS_KEY_ID="op://development/aws/Access Keys/ac
 `AWS_SECRET_ACCESS_KEY="op://development/aws/Access Keys/secret_access_key"` are understood 
 as runtime references for `op run`, not as leaked credentials.
 
+This is also the end state the remediation text points at, which makes it
+verifiable: convert a flagged file to `op://` references and re-scan, and the
+finding goes away.
+
+### Remediation is ordered by what removes exposure
+
+A plaintext credential on disk is readable by every process running as the user
+and by anything that reaches the machine afterwards, so it stays usable long
+after an initial compromise. That is the exposure these findings describe, and
+remediation is ordered accordingly:
+
+1. **Move the value into a secrets manager and reference it at runtime.** This
+   is the only step that removes the credential from the disk. Where `op` or
+   `vault` is detected on the host, the finding names it with a runnable
+   command rather than advising "use a secrets manager" generically.
+2. **The reason**, stated in the finding, so the priority is not just asserted.
+3. **`.env` as a last resort, not a fix.** Restrict it (`chmod 600`), keep it
+   out of git, and rotate anything already committed.
+
+`.gitignore` deliberately comes last and is qualified: it prevents a *future*
+commit, does not apply to files already tracked, and does not reduce the
+on-disk exposure at all. Earlier versions of this tool opened with it, which
+read as "keep using `.env`, just don't commit it".
+
 ## What It Does Not Do
 
 `rattlesnake` is a detector, not a validator, that simply reports potential exposure. `rattlesnake` does not try to prove whether the credential is still live, revoked, expired, or unusable. The goal is to make you aware and give your agent a strong headstart around how best to remediate that exposure.

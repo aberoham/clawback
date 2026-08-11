@@ -24,6 +24,7 @@ import pathlib
 import platform
 import plistlib
 import re
+import shutil
 import socket
 import stat
 import struct
@@ -630,6 +631,67 @@ def octal_permissions(path: pathlib.Path) -> Optional[str]:
         return oct(stat.S_IMODE(mode))
     except OSError:
         return None
+
+
+_SECRETS_MANAGER_CACHE: Dict[str, bool] = {}
+
+
+def secrets_manager_installed(tool: str) -> bool:
+    """Whether a secrets-manager CLI is on PATH. Cached per process."""
+    if tool not in _SECRETS_MANAGER_CACHE:
+        _SECRETS_MANAGER_CACHE[tool] = shutil.which(tool) is not None
+    return _SECRETS_MANAGER_CACHE[tool]
+
+
+def secret_at_rest_remediation(env_file: bool = False) -> str:
+    """Remediation for a credential stored in plaintext on this machine.
+
+    Ordered by what actually reduces exposure. A plaintext credential on disk
+    is readable by every process running as the user and by anything that lands
+    on the host afterwards -- which is the exposure this scanner exists to
+    report. Keeping the file out of git prevents a second, different leak; it
+    does nothing about the first, so it is named last and labelled as such.
+
+    Concrete commands are given when the corresponding CLI is present, since
+    generic advice to "use a secrets manager" is easy to defer.
+    """
+    if secrets_manager_installed("op"):
+        primary = (
+            "1) Move this value into 1Password and replace it with an "
+            "op:// reference, then load it at runtime: "
+            "op run -- <your command>. (This scanner treats op:// values as "
+            "safe, so a converted file stops being a finding.)"
+        )
+    elif secrets_manager_installed("vault"):
+        primary = (
+            "1) Move this value into Vault and inject it at runtime with "
+            "vault read / an agent template rather than storing it on disk."
+        )
+    else:
+        primary = (
+            "1) Move this value into a secrets manager and reference it at "
+            "runtime -- 1Password CLI (op run), Hashicorp Vault, or the "
+            "macOS Keychain. Install one; this is the only step that removes "
+            "the credential from this disk."
+        )
+
+    warning = (
+        "2) Understand why: a plaintext credential here is readable by any "
+        "process running as you and by anyone who gains access to this "
+        "machine later, so it stays usable long after an initial compromise. "
+        "That is the exposure reported here."
+    )
+
+    if not env_file:
+        return f"{primary} {warning}"
+
+    return (
+        f"{primary} {warning} "
+        "3) Treat a .env file as a last resort, not a fix: if you cannot "
+        "avoid one, restrict it (chmod 600), keep it out of git, and rotate "
+        "anything already committed -- .gitignore does not apply to files "
+        "already tracked, and it never reduces the on-disk exposure above."
+    )
 
 
 def run_cmd(args: List[str], timeout: int = 5) -> Optional[str]:
@@ -1539,8 +1601,7 @@ def scan_shell_profiles(ctx: ScanContext, quiet: bool) -> None:
                     cat, profile, severity,
                     f"Secret variable '{var_name}' in "
                     f"{profile.name}:{line_num}",
-                    "Move to macOS Keychain or 1Password CLI. "
-                    "Use 'op run' to inject secrets at runtime.",
+                    secret_at_rest_remediation(),
                     variable=var_name,
                     line=line_num,
                     reason=reason,
@@ -1617,7 +1678,7 @@ def scan_environment_variables(ctx: ScanContext, quiet: bool) -> None:
             ctx.add(
                 cat, f"env:{var_name}", severity,
                 f"Secret in environment variable: {var_name}",
-                "Unset this variable and use a secrets manager.",
+                secret_at_rest_remediation(),
                 variable=var_name,
                 reason=val_reason,
             )
@@ -1637,7 +1698,7 @@ def scan_environment_variables(ctx: ScanContext, quiet: bool) -> None:
                 ctx.add(
                     cat, f"env:{var_name}", nv_severity,
                     f"Secret in environment variable: {var_name}",
-                    "Unset this variable and use a secrets manager.",
+                    secret_at_rest_remediation(),
                     variable=var_name,
                     reason=nv_reason,
                 )
@@ -1791,8 +1852,7 @@ def _report_env_file(
         f".env file with {len(secret_vars)} secret(s): "
         f"{', '.join(var_names[:5])}"
         + (f" (+{len(var_names) - 5} more)" if len(var_names) > 5 else ""),
-        "Add .env to .gitignore. Use a secrets manager or "
-        "direnv with encrypted .envrc.",
+        secret_at_rest_remediation(env_file=True),
         variables=var_names,
     )
 
