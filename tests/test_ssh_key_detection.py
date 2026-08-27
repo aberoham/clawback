@@ -145,21 +145,24 @@ class TestScanSshKeys:
         assert len(scan_ctx.findings) == 1
         assert scan_ctx.findings[0].severity == "medium"
 
-    def test_unencrypted_0400_treated_as_bad_perms(
-        self, scan_ctx, clean_env
-    ):
-        """0o400 (owner read-only) is more restrictive than 0o600, but the
-        scanner currently treats anything != 0o600 as bad_perms. This pins
-        the current behavior: unencrypted + 0o400 = CRITICAL. If the scanner
-        is updated to accept 0o400 as valid, this test should be updated to
-        expect HIGH (unencrypted, good perms)."""
+    def test_unencrypted_0400_is_good_perms(self, scan_ctx, clean_env):
+        """0o400 is stricter than 0o600, so only the missing passphrase counts.
+
+        Updated per the previous version of this test, which pinned the
+        equality check against 0o600 and noted that accepting 0o400 should
+        move this to HIGH. Permissions are now tested by mask, so a
+        read-only owner-only key is no longer called overly permissive.
+        """
         self._write_key(
             scan_ctx, "id_rsa", UNENCRYPTED_RSA_PEM, 0o400
         )
         scan_ssh_keys(scan_ctx, quiet=True)
         assert len(scan_ctx.findings) == 1
-        assert scan_ctx.findings[0].severity == "critical"
-        assert "0o400" in scan_ctx.findings[0].description
+        finding = scan_ctx.findings[0]
+        assert finding.severity == "high"
+        assert "overly permissive" not in finding.description
+        # Advising chmod 600 here would loosen a correct file.
+        assert "chmod 600" not in finding.remediation
 
     def test_encrypted_good_perms_observation(self, scan_ctx, clean_env):
         self._write_key(

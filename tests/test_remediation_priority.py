@@ -128,8 +128,10 @@ class TestPostExploitationWarning:
         assert "readable by any process running as you" in remediation
         assert "long after an initial compromise" in remediation
 
-    def test_warning_appears_for_non_env_findings_too(self, tmp_path, no_tools):
-        """Shell profiles and env vars share the same underlying exposure."""
+    def test_warning_appears_for_shell_profile_findings_too(
+        self, tmp_path, no_tools
+    ):
+        """Shell profiles and env files share the same at-rest exposure."""
         text = secret_at_rest_remediation()
 
         assert "readable by any process running as you" in text
@@ -236,3 +238,6 @@ class TestEnvironmentVariableFindings:
         assert hits
         assert hits[0].remediation.startswith("1)")
         assert "secrets manager" in hits[0].remediation
+        assert "Unset this variable" in hits[0].remediation
+        assert "credential from this disk" not in hits[0].remediation
+        assert "inherited by child processes" in hits[0].remediation
