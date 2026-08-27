@@ -256,6 +256,30 @@ A sensible approach for fleet-wide rollout would be:
 3. use audit or training mode to refine heuristics, contribute those back upstream to this project
 4. only then widen deployment fleet-wide through JAMF, Intune, etc
 
+## Windows (`rattlesnake.ps1` + `antivenom.ps1`)
+
+The Python scanner assumes `python3` is present; on a managed Windows fleet it usually is not. `rattlesnake.ps1` is a separate implementation of the secrets-at-rest scanner **against the same JSON schema**, so `antivenom` output is interchangeable. It targets **Windows PowerShell 5.1** — on one measured estate (Aug 2026) `powershell.exe` was present on 98.7% of Windows hosts versus 1.0% for `pwsh` 7 — is a single file, read-only, and **metadata-only** (never emits a secret value).
+
+Two properties make it safe to detonate over CrowdStrike RTR:
+
+- **No backticks anywhere** — RTR's inline `runscript -Raw=` uses a triple-backtick delimiter, and a stray backtick closes it early (backtick is also PowerShell's escape char, so escapes are spelled out as `[char]10` etc.). `tools/Build-RtrPayload.ps1` produces the minified delivery build and fails if a backtick appears.
+- **Runs inline, writes nothing** — managed builds run ExecutionPolicy `Restricted`, so a dropped `.ps1` will not run; the RTR host executes the payload directly and no file touches disk.
+
+```powershell
+# local
+powershell -NoProfile -ExecutionPolicy Bypass -File rattlesnake.ps1 -Pretty
+# whole host, every profile (auto-enabled as SYSTEM under RTR)
+powershell -NoProfile -ExecutionPolicy Bypass -File rattlesnake.ps1 -AllUsers -OutputFile scan.json -Quiet
+# straight into the Windows remediation generator
+rattlesnake.ps1 -AllUsers -Quiet | antivenom.ps1 -Preview
+```
+
+Categories mirror the macOS secrets-at-rest set (cloud creds, SSH, git, package tokens, kubeconfig, `.env`, shell profiles) plus two Windows-native ones — `windows_native` (GPP `cpassword`, unattend/sysprep, Winlogon autologon, machine env vars, IIS `web.config`) and `wsl_homes` — and covers PSReadLine console history under shell profiles. The supply-chain-compromise categories are not ported yet.
+
+`antivenom.ps1` is the Windows sibling of `antivenom.py`: same pack layout (`index.md`, `metadata.md`, `tasks/*.md`), PowerShell launchers instead of `.sh`, Windows-worded remediation (Credential Manager, `icacls`, `aws sso`/WIF, PSReadLine clearing), and the **same rotation gate** — a `malware_persistence` finding withholds all launchers and forces watcher-shutdown before any rotation.
+
+Design notes, the fleet measurement, and the real-RTR validation record are in [`docs/windows-port.md`](docs/windows-port.md).
+
 ## Antivenom
 
 `antivenom.py` is the companion remediation tool that consumes rattlesnake JSON output and generates a **remediation pack** which isn't much more than an ordered set of agent-ready markdown tasks ready for your coding agent.
