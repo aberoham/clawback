@@ -4,13 +4,12 @@
 
 ## Why this is a rewrite, not a translation
 
-The macOS scanner is Python; the Windows estate cannot rely on Python. Measured across the CrowdStrike fleet on 2026-08-27:
+The macOS scanner is Python; the Windows estate cannot rely on Python. Measured across a managed Windows fleet (Aug 2026):
 
-| runtime | hosts | share |
-|---|---|---|
-| `powershell.exe` (Windows PowerShell 5.1) | 2,999 | 98.7% |
-| `pwsh.exe` (PowerShell 7) | 30 | 1.0% |
-| Windows hosts total | 3,037 | — |
+| runtime | share of Windows hosts |
+|---|---|
+| `powershell.exe` (Windows PowerShell 5.1) | 98.7% |
+| `pwsh.exe` (PowerShell 7) | 1.0% |
 
 So the target is **Windows PowerShell 5.1**, single file, stdlib/.NET-Framework only. This is the mirror image of the macOS constraint (~41% of Macs lack `/usr/bin/python3`, which is why `rattlesnake.pl` exists).
 
@@ -41,12 +40,12 @@ Two PowerShell traps also worth recording: `$Home` is a read-only automatic vari
 
 ## Validation record — real RTR, 2026-08-27
 
-Host `THG-B2P16M2` (AID `8b34684983b64144ac9a77395a2cbfb8`), executed as `NT AUTHORITY\SYSTEM`, Windows PowerShell 5.1.26100.
+A managed Windows 11 test host, executed as `NT AUTHORITY\SYSTEM`, Windows PowerShell 5.1.26100.
 
 | check | result |
 |---|---|
 | `runscript -Raw=` delivery | works |
-| Multi-user as SYSTEM | 3 profiles enumerated (`Kebab`, `proffittj`, `StaffTechnology`) — a user-context run saw only 1 |
+| Multi-user as SYSTEM | all three user profiles on the host enumerated — a user-context run saw only 1 |
 | `-AllUsers` full scan | rc=0, ~3s, 0 findings, 0 errors, **0 coverage gaps** |
 | Live positive control | planted `.env` marker → detected, correct owner + classification, **no secret value in output**, rc=1 |
 | Metadata-only invariant | finding carried key name / reason / path / owner only |
