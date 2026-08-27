@@ -18,17 +18,29 @@ nav_order: 1
 
 ## The target state
 
-A macOS developer workstation is fully remediated when rattlesnake returns **zero findings** -- no long-lived, reusable secrets in plaintext on disk. The ideal output is a set of *observations* confirming compliant configurations (SSO profiles, credential helpers, exec plugins) without exposing secret values.
+A macOS developer workstation is fully remediated when rattlesnake returns
+**zero findings** across both exposure and active-compromise categories. That
+means no reported plaintext credentials, exposed runtime variables, unsafe key
+files, wallet data, known-malicious packages, autostart hooks, repository worm
+artifacts, or malware persistence. Observations provide posture context but are
+not proof that a configuration is safe.
 
-"Fully remediated" does not mean "zero secrets anywhere." It means **zero long-lived, reusable plaintext secrets on disk** -- in config files, dotfiles, environment variables, or shell profiles.
+"Fully remediated" does not mean "zero secrets anywhere." For credential
+posture it means no long-lived, reusable plaintext secrets on disk in config
+files, dotfiles, or shell profiles, and no secret-shaped values exposed through
+the scanned live environment.
 
-## Four testable parameters
+## Four credential-posture parameters
 
 A remediated workstation satisfies four criteria:
 
 ### 1. Absence of high-entropy strings on disk
 
-No plaintext keys, tokens, or passwords in config files, dotfiles, or environment variables. Files like `~/.aws/credentials`, `~/.npmrc`, and `~/.pypirc` either do not exist, contain no secret values, or use vault references (`op://` URIs, `${VAR}` placeholders) instead of raw material.
+No plaintext keys, tokens, or passwords in config files or dotfiles. Files like
+`~/.aws/credentials`, `~/.npmrc`, and `~/.pypirc` either do not exist, contain
+no secret values, or use vault references (`op://` URIs, `${VAR}` placeholders)
+instead of raw material. Secret-shaped values must also be absent from the live
+environment unless injected only into a deliberately scoped child process.
 
 ### 2. Ephemeral execution chains
 
@@ -52,14 +64,17 @@ After full remediation, a rattlesnake scan should produce:
 
 - **Zero findings** across all categories
 - **Observations** confirming compliant configurations, such as:
-  - AWS CLI profiles configured for IAM Identity Center (SSO metadata in `~/.aws/config`, no `aws_access_key_id` in `~/.aws/credentials`)
+  - AWS configuration present with no `~/.aws/credentials` finding (the scanner does not prove that the config uses IAM Identity Center)
   - Docker configured with a credential store (`credsStore: "osxkeychain"`) instead of base64 credentials in `auths`
-  - Git using `credential.helper = osxkeychain` with no `~/.git-credentials` file
+  - Git using `credential.helper = osxkeychain` with neither
+    `~/.git-credentials` nor `~/.config/git/credentials` present
   - Kubernetes kubeconfig using exec-based plugins with no embedded tokens or certificates
   - 1Password CLI or Vault CLI installed and available
 
 ## What "fully remediated" is not
 
-- It is **not** "zero secrets anywhere." Local ADC files with `type: authorized_user` are acceptable -- they contain short-lived user tokens, not service account keys.
+- It is **not** "zero secrets anywhere." Secure stores can retain encrypted
+  material, but a local ADC file with `type: authorized_user` still produces a
+  HIGH finding because it contains reusable refresh material.
 - It is **not** achievable by local changes alone. If CI pipelines still consume the same static secrets, the risk is relocated rather than eliminated. See [CI/CD Implications](cicd-matrix.md).
 - It is **not** a one-time event. Credentials drift back as developers install new tools, onboard to new services, or take shortcuts under deadline pressure. Periodic re-scanning is the enforcement mechanism.

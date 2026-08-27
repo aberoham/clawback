@@ -52,6 +52,11 @@ LOCKFILE_MAX_BYTES = 64 * 1024 * 1024
 # Bound on project roots inspected for npm compromise, so a workstation with
 # hundreds of checkouts cannot turn one scan into a filesystem crawl.
 NPM_MAX_PROJECT_ROOTS = 400
+# Bound JSON files inspected while looking for downloaded GCP service-account
+# keys. The shared directory/time ceilings still apply; this prevents a large
+# monorepo full of generated JSON from dominating the cloud scan.
+GCP_MAX_JSON_FILES = 5000
+GCP_KEY_FILE_READ_BYTES = 128 * 1024
 # Bound on packages inspected inside a single node_modules tree.
 NPM_MAX_PACKAGES_PER_TREE = 4000
 # Global install prefixes. `npm root -g` would be authoritative but needs a
@@ -520,6 +525,8 @@ CRYPTO_WALLET_PATHS = [
     "Library/Ethereum/keystore",
     ".electrum/wallets",
 ]
+SOLANA_DEFAULT_KEYPAIR = ".config/solana/id.json"
+SOLANA_CLI_CONFIG = ".config/solana/cli/config.yml"
 
 
 class Severity(str, Enum):
@@ -1204,6 +1211,91 @@ def _scan_gcp(ctx: ScanContext, cat: str) -> None:
             target_path=ga_creds,
         )
 
+    _scan_downloaded_gcp_keys(ctx, cat, exclude={adc})
+
+
+def _scan_downloaded_gcp_keys(
+    ctx: ScanContext,
+    cat: str,
+    exclude: Optional[Set[pathlib.Path]] = None,
+) -> None:
+    """Find service-account key JSON outside the standard ADC location.
+
+    The filename of a console-downloaded key is derived from the project and is
+    not stable, so detection is content-based. Requiring both the credential
+    type and an actual PEM private-key block avoids flagging documentation,
+    external-account configs, and templates that merely mention service
+    accounts.
+    """
+    excluded: Set[pathlib.Path] = set()
+    for path in exclude or set():
+        try:
+            excluded.add(path.resolve())
+        except OSError:
+            excluded.add(path)
+
+    examined = 0
+    reported: Set[pathlib.Path] = set()
+
+    def inspect(_directory: pathlib.Path, entries: List[pathlib.Path]) -> None:
+        nonlocal examined
+        for entry in entries:
+            if examined >= GCP_MAX_JSON_FILES:
+                return
+            if entry.suffix.lower() != ".json":
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+                resolved = entry.resolve()
+            except OSError:
+                continue
+            if resolved in excluded or resolved in reported:
+                continue
+
+            examined += 1
+            content = safe_read(entry, GCP_KEY_FILE_READ_BYTES)
+            if not content or "service_account" not in content or "private_key" not in content:
+                continue
+            try:
+                data = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(data, dict) or data.get("type") != "service_account":
+                continue
+            private_key = data.get("private_key")
+            if not isinstance(private_key, str) or not re.search(
+                r"-----BEGIN (?:RSA )?PRIVATE KEY-----", private_key
+            ):
+                continue
+
+            reported.add(resolved)
+            ctx.add(
+                cat, entry, Severity.CRITICAL,
+                "GCP service account private key file",
+                "Revoke and delete this key, then use user ADC, service account "
+                "impersonation, or Workload Identity Federation.",
+                project_id=data.get("project_id"),
+                client_email=data.get("client_email"),
+            )
+
+    # Console downloads commonly land in Downloads, which is intentionally not
+    # part of source-checkout discovery. Include it here, plus the ordinary
+    # developer roots, and inspect top-level JSON files in the home directory.
+    roots = _npm_search_roots(ctx)
+    downloads = ctx.home / "Downloads"
+    if downloads.is_dir() and downloads not in roots:
+        roots.append(downloads)
+    inspect(ctx.home, _safe_iterdir(ctx.home))
+    _walk_project_tree(
+        ctx,
+        inspect,
+        GCP_MAX_JSON_FILES,
+        lambda: examined,
+        gap_category=cat,
+        roots=roots,
+    )
+
 
 def _scan_azure(ctx: ScanContext, cat: str) -> None:
     azure_dir = ctx.home / ".azure"
@@ -1359,23 +1451,13 @@ def scan_git_credentials(ctx: ScanContext, quiet: bool) -> None:
     progress("git credentials", quiet)
     cat = "git_credentials"
 
-    # Plaintext credential store
-    git_creds = ctx.home / ".git-credentials"
-    if file_exists_nonempty(git_creds):
-        content = safe_read(git_creds)
-        count = 0
-        if content:
-            count = sum(
-                1 for line in content.splitlines()
-                if re.match(r"https?://[^:]+:[^@]+@", line)
-            )
-        ctx.add(
-            cat, git_creds, Severity.CRITICAL,
-            f"Plaintext git credentials file with ~{count} stored credential(s)",
-            "Switch to osxkeychain helper: "
-            "git config --global credential.helper osxkeychain",
-            credential_count=count,
-        )
+    # Plaintext credential stores. Git's XDG path is used when
+    # credentialStore points there or tooling follows XDG conventions.
+    for git_creds in (
+        ctx.home / ".git-credentials",
+        ctx.home / ".config/git/credentials",
+    ):
+        _scan_git_credential_file(ctx, cat, git_creds)
 
     # Git config: check credential helper
     gitconfig = ctx.home / ".gitconfig"
@@ -1419,6 +1501,27 @@ def scan_git_credentials(ctx: ScanContext, quiet: bool) -> None:
             )
 
 
+def _scan_git_credential_file(
+    ctx: ScanContext, cat: str, path: pathlib.Path
+) -> None:
+    if not file_exists_nonempty(path):
+        return
+    content = safe_read(path)
+    count = 0
+    if content:
+        count = sum(
+            1 for line in content.splitlines()
+            if re.match(r"https?://[^:]+:[^@]+@", line)
+        )
+    ctx.add(
+        cat, path, Severity.CRITICAL,
+        f"Plaintext git credentials file with ~{count} stored credential(s)",
+        "Remove this plaintext store and switch to a credential helper: "
+        "git config --global credential.helper osxkeychain",
+        credential_count=count,
+    )
+
+
 # -------------------------------------------------------------------
 # Category 5: Package Manager Tokens
 # -------------------------------------------------------------------
@@ -1436,18 +1539,63 @@ def scan_package_manager_tokens(ctx: ScanContext, quiet: bool) -> None:
 
 def _scan_npmrc(ctx: ScanContext, cat: str) -> None:
     npmrc = ctx.home / ".npmrc"
-    if not file_exists_nonempty(npmrc):
+    _report_npmrc_auth(ctx, cat, npmrc, Severity.CRITICAL, project=False)
+
+    for root in _find_npm_project_roots(ctx, gap_category=cat):
+        project_npmrc = root / ".npmrc"
+        _report_npmrc_auth(
+            ctx, cat, project_npmrc, Severity.HIGH, project=True
+        )
+
+
+def _npmrc_plaintext_auth_settings(content: str) -> List[str]:
+    """Auth settings whose values are material, not runtime references."""
+    found: List[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")) or "=" not in line:
+            continue
+        raw_key, raw_value = line.split("=", 1)
+        setting = raw_key.rsplit(":", 1)[-1].strip().lower()
+        if setting not in ("_authtoken", "_password", "_auth"):
+            continue
+        value = _strip_quotes(raw_value)
+        if not value:
+            continue
+        if value.startswith("op://"):
+            continue
+        if re.fullmatch(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)", value):
+            continue
+        if TEMPLATE_PLACEHOLDER_RE.fullmatch(value):
+            continue
+        found.append(setting)
+    return found
+
+
+def _report_npmrc_auth(
+    ctx: ScanContext,
+    cat: str,
+    path: pathlib.Path,
+    severity: Severity,
+    project: bool,
+) -> None:
+    if not file_exists_nonempty(path):
         return
-    content = safe_read(npmrc)
+    content = safe_read(path)
     if not content:
         return
-    if re.search(r"_authToken|_password|(?:^|\n)\s*_auth\s*=", content):
-        ctx.add(
-            cat, npmrc, Severity.CRITICAL,
-            "npm auth token in .npmrc (CanisterWorm propagation vector)",
-            "Use npm login --auth-type=web for short-lived tokens. "
-            "Scope tokens to minimum required packages.",
-        )
+    settings = _npmrc_plaintext_auth_settings(content)
+    if not settings:
+        return
+    location = "Project-level" if project else "User-level"
+    ctx.add(
+        cat, path, severity,
+        f"{location} .npmrc with plaintext authentication",
+        "Replace the value with ${NPM_TOKEN} and inject a scoped token at "
+        "runtime from a secrets manager. Rotate any token already committed.",
+        auth_settings=sorted(set(settings)),
+        project_level=project,
+    )
 
 
 def _scan_pypirc(ctx: ScanContext, cat: str) -> None:
@@ -1995,6 +2143,18 @@ def scan_crypto_wallets(ctx: ScanContext, quiet: bool) -> None:
     progress("cryptocurrency wallets", quiet)
     cat = "crypto_wallets"
 
+    for keypair in _solana_keypair_paths(ctx):
+        if not _is_solana_keypair_file(keypair):
+            continue
+        ctx.add(
+            cat, keypair, Severity.HIGH,
+            "Solana CLI private keypair file",
+            "Move signing to a hardware wallet or another protected signer. "
+            "After confirming the replacement works and backing it up safely, "
+            "remove the plaintext keypair from this machine.",
+            keypair_format="solana_json_64_byte",
+        )
+
     for rel_path in CRYPTO_WALLET_PATHS:
         p = ctx.home / rel_path
         try:
@@ -2008,6 +2168,58 @@ def scan_crypto_wallets(ctx: ScanContext, quiet: bool) -> None:
                 )
         except OSError:
             pass
+
+
+def _solana_keypair_paths(ctx: ScanContext) -> List[pathlib.Path]:
+    """Default and CLI-configured Solana keypair paths, deduplicated."""
+    candidates = [ctx.home / SOLANA_DEFAULT_KEYPAIR]
+    config = ctx.home / SOLANA_CLI_CONFIG
+    content = safe_read(config)
+    if content:
+        match = re.search(r"^\s*keypair_path:\s*(.+?)\s*$", content, re.MULTILINE)
+        if match:
+            raw = _strip_quotes(match.group(1))
+            if raw and "://" not in raw:
+                if raw == "~":
+                    configured = ctx.home
+                elif raw.startswith("~/"):
+                    configured = ctx.home / raw[2:]
+                else:
+                    configured = pathlib.Path(raw)
+                    if not configured.is_absolute():
+                        configured = config.parent / configured
+                candidates.append(configured)
+
+    out: List[pathlib.Path] = []
+    seen: Set[pathlib.Path] = set()
+    for path in candidates:
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
+
+
+def _is_solana_keypair_file(path: pathlib.Path) -> bool:
+    """Whether path is a Solana CLI JSON encoding of a private keypair."""
+    if not file_exists_nonempty(path):
+        return False
+    content = safe_read(path, 4096)
+    if not content:
+        return False
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return (
+        isinstance(data, list)
+        and len(data) == 64
+        and all(isinstance(value, int) and 0 <= value <= 255 for value in data)
+    )
 
 
 # -------------------------------------------------------------------
@@ -2151,6 +2363,8 @@ def _walk_project_tree(
     match: Callable[[pathlib.Path, List[pathlib.Path]], None],
     limit: int,
     counter: Callable[[], int],
+    gap_category: str = "supply_chain_discovery",
+    roots: Optional[List[pathlib.Path]] = None,
 ) -> None:
     """Depth-limited walk of the developer directories.
 
@@ -2196,8 +2410,10 @@ def _walk_project_tree(
         except OSError as exc:
             # Silently returning omitted every lockfile, hook and workflow
             # beneath this path while the scan still reported success.
-            ctx.gap("supply_chain_discovery", f"could not list {directory} ({exc}); "
-                "its contents were NOT scanned")
+            ctx.gap(
+                gap_category,
+                f"could not list {directory} ({exc}); its contents were NOT scanned",
+            )
             return
 
         match(directory, entries)
@@ -2215,18 +2431,27 @@ def _walk_project_tree(
             except OSError:
                 pass
 
-    for root in _npm_search_roots(ctx):
+    search_roots = roots if roots is not None else _npm_search_roots(ctx)
+    for root in search_roots:
         walk(root, 0)
 
     if exhausted:
-        ctx.gap("supply_chain_discovery", f"stopped early on {exhausted[0]} after "
-            f"{len(visited)} directories; some projects were NOT scanned")
+        ctx.gap(
+            gap_category,
+            f"stopped early on {exhausted[0]} after {len(visited)} directories; "
+            "some directories were NOT scanned",
+        )
     elif counter() >= limit:
-        ctx.gap("supply_chain_discovery", f"hit the {limit}-item cap; "
-            "some projects were NOT scanned")
+        ctx.gap(
+            gap_category,
+            f"hit the {limit}-item cap; some directories were NOT scanned",
+        )
 
 
-def _find_npm_project_roots(ctx: ScanContext) -> List[pathlib.Path]:
+def _find_npm_project_roots(
+    ctx: ScanContext,
+    gap_category: str = "supply_chain_discovery",
+) -> List[pathlib.Path]:
     """Project roots (directories holding a package.json) under dev dirs."""
     roots: List[pathlib.Path] = []
 
@@ -2234,7 +2459,13 @@ def _find_npm_project_roots(ctx: ScanContext) -> List[pathlib.Path]:
         if any(e.name == "package.json" for e in entries):
             roots.append(directory)
 
-    _walk_project_tree(ctx, match, NPM_MAX_PROJECT_ROOTS, lambda: len(roots))
+    _walk_project_tree(
+        ctx,
+        match,
+        NPM_MAX_PROJECT_ROOTS,
+        lambda: len(roots),
+        gap_category=gap_category,
+    )
     return roots
 
 

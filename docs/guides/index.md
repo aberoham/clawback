@@ -12,6 +12,10 @@ Each guide covers one credential type that rattlesnake detects, with tiered reme
 
 Every guide follows the same structure: what rattlesnake finds, why it is exposed, Tier 1/2/3 remediation options, verification, common mistakes, and CI/CD implications.
 
+These guides cover credential and wallet findings. Active-compromise findings
+are human-first incident response and carry their own ordered instructions in
+the scan report and Antivenom pack.
+
 ---
 
 ### Cloud credentials

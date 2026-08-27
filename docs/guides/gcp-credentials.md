@@ -4,7 +4,8 @@ parent: Remediation Guides
 nav_order: 2
 description: >-
   Remediate GCP service account key files and ADC configurations found by
-  rattlesnake in ~/.config/gcloud/ and GOOGLE_APPLICATION_CREDENTIALS.
+  rattlesnake in ~/.config/gcloud/, Downloads, developer directories, and
+  GOOGLE_APPLICATION_CREDENTIALS.
 rattlesnake_category: cloud_credentials
 ---
 
@@ -27,9 +28,9 @@ GCP Application Default Credentials (ADC) provide a uniform way for Google Cloud
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
 | `~/.config/gcloud/application_default_credentials.json` with `"type": "service_account"` | CRITICAL | Service account key file as ADC |
-| `~/.config/gcloud/application_default_credentials.json` with `"type": "authorized_user"` | INFO (observation) | User ADC -- short-lived, acceptable |
-| `GOOGLE_APPLICATION_CREDENTIALS` env var pointing to a key file | HIGH | Locator pointing to service account key material |
-| Service account JSON files on disk | CRITICAL | Key files downloaded from GCP console |
+| `~/.config/gcloud/application_default_credentials.json` with `"type": "authorized_user"` | HIGH | User ADC containing reusable refresh material |
+| Non-`op://` `GOOGLE_APPLICATION_CREDENTIALS` env var | HIGH | Unvalidated credential-file locator; the target may be a key or a federation config |
+| Service-account JSON in the home directory, Downloads, or developer directories | CRITICAL | Downloaded key with `type=service_account` and a PEM private key |
 
 ## Why it's exposed
 
@@ -39,9 +40,12 @@ A common confusion: developers run `gcloud auth login` (authenticates only the `
 
 ## Tier 1: Eliminate the static credential
 
-### User ADC (for local development)
+### User ADC (lower-risk local development)
 
-Produces short-lived user credentials that SDKs pick up automatically. No key file on disk.
+Produces short-lived access tokens that SDKs pick up automatically, but the ADC
+file still contains reusable refresh material. Rattlesnake therefore reports
+the file as HIGH even though it is preferable to a non-expiring service-account
+private key.
 
 **Setup:**
 
@@ -88,7 +92,10 @@ gcloud iam workload-identity-pools create-cred-config \
 export GOOGLE_APPLICATION_CREDENTIALS=credential-config.json
 ```
 
-The config file contains federation metadata, not key material.
+The config file contains federation metadata, not private-key material.
+Rattlesnake currently reports any non-`op://`
+`GOOGLE_APPLICATION_CREDENTIALS` locator as HIGH; it does not validate the
+target configuration type, so verify a WIF target manually.
 
 ## Tier 2: Vault the credential
 
@@ -118,11 +125,11 @@ unset GOOGLE_APPLICATION_CREDENTIALS
 ## Verification
 
 ```bash
-# Check ADC file type (should be "authorized_user", not "service_account")
+# Check ADC file type (service_account is CRITICAL; other ADC remains HIGH)
 cat ~/.config/gcloud/application_default_credentials.json | python3 -c \
   "import sys,json; print(json.load(sys.stdin).get('type','missing'))"
 
-# Check for service account key files
+# Check broadly for service account key files
 find ~ -name "*.json" -exec grep -l '"type": "service_account"' {} \; 2>/dev/null
 
 # Check GOOGLE_APPLICATION_CREDENTIALS

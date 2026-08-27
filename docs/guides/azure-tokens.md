@@ -28,7 +28,7 @@ Azure CLI caches authentication tokens on disk. On macOS, these caches are **sto
 |-----------------|----------|-------------|
 | `~/.azure/msal_token_cache.json` | HIGH | MSAL token cache, plaintext on macOS by default |
 | `~/.azure/accessTokens.json` | HIGH | Legacy ADAL token cache (deprecated, should not exist) |
-| `AZURE_CLIENT_SECRET` env var | CRITICAL | Service principal client secret in environment |
+| Secret-shaped `AZURE_CLIENT_SECRET` env var | CRITICAL | Service principal client secret in environment |
 
 ## Why it's exposed
 

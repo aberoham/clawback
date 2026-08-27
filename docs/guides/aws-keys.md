@@ -26,11 +26,12 @@ AWS static access keys are long-lived IAM credentials that grant programmatic ac
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
-| `~/.aws/credentials` | HIGH-CRITICAL | Static `aws_access_key_id` and `aws_secret_access_key` in INI format |
-| `AWS_ACCESS_KEY_ID` env var | CRITICAL | Access key exported in environment |
-| `AWS_SECRET_ACCESS_KEY` env var | CRITICAL | Secret key exported in environment |
-| `AWS_SESSION_TOKEN` env var | MEDIUM | Session token (short-lived, but indicates credential workflow) |
-| `~/.zshrc`, `.env` files | HIGH | Keys hardcoded in shell profiles or environment files |
+| `~/.aws/credentials` | HIGH | Non-empty AWS credentials file |
+| Secret-shaped `AWS_ACCESS_KEY_ID` env var | CRITICAL | Access key exported in environment |
+| Secret-shaped `AWS_SECRET_ACCESS_KEY` env var | CRITICAL | Secret key exported in environment |
+| `AWS_SESSION_TOKEN` env var | CRITICAL | Secret-shaped session token in the live environment |
+| AWS keys in shell profiles | HIGH | Named cloud credential stored in a shell profile |
+| AWS keys in `.env` files | CRITICAL | Cloud credential stored in a plaintext environment file |
 
 ## Why it's exposed
 

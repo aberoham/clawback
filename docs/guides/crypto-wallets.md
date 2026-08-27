@@ -28,12 +28,16 @@ Cryptocurrency wallets contain private keys or seed phrases that control on-chai
 |-----------------|----------|-------------|
 | `~/Library/Application Support/Exodus/` | HIGH | Exodus wallet data |
 | `~/Library/Application Support/Electrum/` | HIGH | Electrum wallet data |
-| Solana keypair files | HIGH | Solana CLI keypair (private key) |
+| `~/.config/solana/id.json` or CLI-configured keypair path | HIGH | Valid 64-byte Solana CLI private keypair array |
 | Other wallet application directories | HIGH | Various wallet data locations |
 
 ## Why it's exposed
 
-Hot wallets store private keys on disk for convenience -- the developer can sign transactions without external hardware. Solana CLI generates keypair files in the home directory. Desktop wallet applications store encrypted (or unencrypted) wallet data in `~/Library/Application Support/`.
+Hot wallets store private keys on disk for convenience -- the developer can
+sign transactions without external hardware. Solana CLI uses
+`~/.config/solana/id.json` by default and can point to another keypair in its
+CLI config. Desktop wallet applications store encrypted (or unencrypted)
+wallet data in `~/Library/Application Support/`.
 
 In 2025-2026, macOS-targeting malware has been observed replacing legitimate wallet applications with trojanized versions that exfiltrate keys on launch.
 
@@ -92,8 +96,9 @@ fdesetup status  # should report "FileVault is On"
 # Verify recovery key is valid
 sudo fdesetup validaterecovery
 
-# Check for Solana keypair files
+# Check the default and configured Solana keypair paths
 ls -la ~/.config/solana/id.json 2>/dev/null
+grep '^keypair_path:' ~/.config/solana/cli/config.yml 2>/dev/null
 
 # Verify wallet app signatures
 codesign --verify --deep --strict "/Applications/Ledger Live.app" 2>&1
