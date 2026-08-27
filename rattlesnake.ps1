@@ -4,10 +4,10 @@
     value; only paths, key names, an owner, and a classification reason.
 
     Runtime: Windows PowerShell 5.1 (System.Management.Automation, .NET
-    Framework). Measured 2026-08-27 across the estate: powershell.exe present
-    on 2,999 of 3,037 Windows hosts (98.7%); pwsh.exe on 30 (1.0%). 5.1 is
+    Framework). Measured across a managed Windows fleet (Aug 2026):
+    powershell.exe present on 98.7% of Windows hosts; pwsh.exe on 1.0%. 5.1 is
     therefore the only viable target - the inverse of the macOS problem, where
-    ~41% of Macs lacked /usr/bin/python3 and forced the Perl port.
+    a large share of Macs lacked /usr/bin/python3 and forced the Perl port.
 
     DELIVERY - read this before editing:
 
@@ -35,7 +35,7 @@
     hunt findings register consume it unchanged. Exit 0 clean / 1 findings /
     2 scan error.
 
-    Scope v1 (hunt #317687, Windows population): secrets-at-rest equivalents
+    Scope v1: the secrets-at-rest equivalents
     plus the Windows-native surface that has no macOS analogue. The four
     supply-chain-compromise categories are deliberately NOT ported yet - they
     carry a bigger blast radius and the macOS case requires their own separate
