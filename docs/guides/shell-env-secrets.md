@@ -5,7 +5,7 @@ nav_order: 12
 description: >-
   Remediate hardcoded API keys and secrets found by rattlesnake in shell
   profiles (~/.zshrc) and .env files.
-rattlesnake_category: shell_profiles
+rattlesnake_category: shell_profile_secrets
 ---
 
 # Shell profile and .env file secrets
@@ -13,7 +13,10 @@ rattlesnake_category: shell_profiles
 
 Hardcoded secrets in shell profiles (`~/.zshrc`, `~/.bashrc`) and `.env` files are the most common form of credential exposure on developer workstations. Every child process inherits these values, and any malware with file read access can harvest them.
 
-This guide covers three rattlesnake categories: `shell_profiles`, `environment_variables`, and `env_files`.
+This guide covers the `shell_profile_secrets`, `environment_variables`, and
+`env_files` finding categories. Select the first scanner with
+`--category shell_profiles`; its JSON findings retain the legacy
+`shell_profile_secrets` name.
 
 <details open markdown="block">
   <summary>Table of contents</summary>
@@ -28,8 +31,8 @@ This guide covers three rattlesnake categories: `shell_profiles`, `environment_v
 
 | Path / indicator | Severity | Category | Description |
 |-----------------|----------|----------|-------------|
-| `export API_KEY=sk-...` in `~/.zshrc` | HIGH | `shell_profiles` | Hardcoded secret in shell profile |
-| `export API_KEY=sk-...` in `~/.bashrc` | HIGH | `shell_profiles` | Hardcoded secret in shell profile |
+| `export API_KEY=sk-...` in `~/.zshrc` | MEDIUM | `shell_profile_secrets` | Generic secret variable in shell profile; named variables such as `OPENAI_API_KEY` are HIGH |
+| `export API_KEY=sk-...` in `~/.bashrc` | MEDIUM | `shell_profile_secrets` | Generic secret variable in shell profile; named variables are HIGH |
 | `API_KEY=sk-...` in `.env` files | HIGH | `env_files` | Plaintext secret in environment file |
 | `API_KEY` in live environment | MEDIUM | `environment_variables` | Secret value detected in running environment |
 

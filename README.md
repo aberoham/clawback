@@ -13,6 +13,7 @@ Or _really_ dig in:
 
 ```bash
 git clone https://github.com/aberoham/rattlesnake.git && cd rattlesnake
+mkdir -p tmp
 python3 rattlesnake.py --quiet --output-file tmp/scan.json
 python3 antivenom.py -i tmp/scan.json --preview --dry-run
 
@@ -79,16 +80,15 @@ just the fields that actually execute, so security tooling whose
 `permissions.deny` list legitimately blocks `curl ... | bash` is not mistaken
 for the thing it defends against.
 
-**Nothing is skipped silently.** A lockfile or manifest that cannot be read or
-parsed, a file too large to hash, and a discovery walk that hits its budget all
-land in `scan_scope.coverage_gaps`. On a scanner whose whole purpose is to
-answer "am I compromised", an unscanned file that reports nothing is
-indistinguishable from a clean one, so it has to say so. Gaps are kept separate
-from `errors` because `errors` sets exit code 2: an inaccessible directory is a
-coverage gap on a healthy host, not a malfunction. Discovery is bounded by a
-directory count and a wall-clock budget as well as a prune list, since a prune
-list is always incomplete — one database storage directory (`~/.dolt`) cost 74
-seconds for three directories during testing.
+**Runtime coverage failures are visible.** A lockfile or manifest that cannot
+be read or parsed, a file too large to hash, and a discovery walk that exhausts
+its item, directory, or time budget all land in `scan_scope.coverage_gaps`.
+Gaps are kept separate from `errors` because `errors` sets exit code 2: an
+inaccessible directory is a coverage gap on a healthy host, not a malfunction.
+Discovery also has fixed depth limits and an explicit prune list; those are
+declared scan boundaries rather than per-path runtime gaps. The bounds matter
+because a prune list is always incomplete — one database storage directory
+(`~/.dolt`) cost 74 seconds for three directories during testing.
 
 ### Tracking a live campaign with `--ioc-file`
 
@@ -153,7 +153,11 @@ pointed at live malware.
 
 ## Audit and Train Modes
 
-Audit mode is for heuristic tuning, where `rattlesnake` emits metadata about found variables without bothering with classification. Training mode is audit mode extended with anonymized output, useful for "autoresearch" style aggregation and classifier refinement. We aim to have zero false positives and no false negatives -- the noise must be squelched!
+Audit mode is for heuristic tuning: `rattlesnake` emits metadata for every
+variable it finds, including the current classification, without filtering out
+benign values. Training mode is audit mode with paths and value prefixes
+anonymized for fleet aggregation and classifier refinement. We aim to have zero
+false positives and no false negatives -- the noise must be squelched!
 
 ### 1. Scan mode
 
@@ -199,9 +203,15 @@ The JSON report includes:
 - `observations`
 - severity summary
 - total findings
+- `scan_scope`, including categories scanned and any coverage gaps
 - scan errors
 
 Audit and training mode emit audit records instead of the normal scan report.
+
+Scanner-selection names and finding-category names differ for two legacy
+categories: `--category shell_profiles` emits `shell_profile_secrets`, and
+`--category teampcp_iocs` emits `teampcp_ioc`. Antivenom's `--category` filter
+uses the name present in the finding JSON.
 
 ## A Note on 1Password References
 
@@ -215,17 +225,17 @@ This is also the end state the remediation text points at, which makes it
 verifiable: convert a flagged file to `op://` references and re-scan, and the
 finding goes away.
 
-### Remediation is ordered by what removes exposure
+### File-at-rest remediation is ordered by what removes exposure
 
-A plaintext credential on disk is readable by every process running as the user
-and by anything that reaches the machine afterwards, so it stays usable long
-after an initial compromise. That is the exposure these findings describe, and
+For `.env` and shell-profile findings, a plaintext credential on disk is
+readable by every process running as the user and by anything that reaches the
+machine afterwards, so it stays usable long after an initial compromise. Their
 remediation is ordered accordingly:
 
 1. **Move the value into a secrets manager and reference it at runtime.** This
    is the only step that removes the credential from the disk. Where `op` or
-   `vault` is detected on the host, the finding names it with a runnable
-   command rather than advising "use a secrets manager" generically.
+   `vault` is detected on the host, the finding gives tool-specific guidance;
+   the 1Password path includes a runnable `op run` command.
 2. **The reason**, stated in the finding, so the priority is not just asserted.
 3. **`.env` as a last resort, not a fix.** Restrict it (`chmod 600`), keep it
    out of git, and rotate anything already committed.
@@ -234,6 +244,12 @@ remediation is ordered accordingly:
 commit, does not apply to files already tracked, and does not reduce the
 on-disk exposure at all. Earlier versions of this tool opened with it, which
 read as "keep using `.env`, just don't commit it".
+
+Live `environment_variables` findings use a different sequence because the
+scanner cannot assume the value is stored on disk: unset the current value,
+remove it from whatever source sets it, then inject it only into the process
+that needs it. This limits immediate inheritance and prevents the value being
+captured in child processes, logs, debugging output, or crash reports.
 
 ## What It Does Not Do
 

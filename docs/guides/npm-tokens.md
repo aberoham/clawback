@@ -3,7 +3,8 @@ title: npm Tokens
 parent: Remediation Guides
 nav_order: 6
 description: >-
-  Remediate npm authentication tokens found by rattlesnake in ~/.npmrc.
+  Remediate npm authentication material found by rattlesnake in user and
+  project .npmrc files.
 rattlesnake_category: package_manager_tokens
 ---
 
@@ -25,9 +26,12 @@ npm tokens in `~/.npmrc` are a primary supply chain attack vector. The November 
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
-| `~/.npmrc` containing `_authToken=` | CRITICAL | npm authentication token in plaintext |
-| `~/.npmrc` containing `_auth=` | CRITICAL | Base64-encoded credentials |
-| Project-level `.npmrc` with tokens | HIGH | Token in project directory (may be committed to Git) |
+| `~/.npmrc` containing a material `_authToken`, `_password`, or `_auth` value | CRITICAL | User-level npm authentication in plaintext |
+| Project-level `.npmrc` with material authentication | HIGH | Authentication in a package root (may be committed to Git) |
+
+Runtime references such as `${NPM_TOKEN}`, `$NPM_TOKEN`, `op://...`, and
+whole-value template placeholders are not findings. The scanner looks for
+project `.npmrc` files at discovered package roots containing `package.json`.
 
 ## Why it's exposed
 
@@ -122,7 +126,7 @@ npm token ls  # audit active tokens and their scopes
 
 ```bash
 # Check for tokens in .npmrc
-grep -n "_authToken\|_auth=" ~/.npmrc .npmrc 2>/dev/null
+grep -n "_authToken\|_password\|_auth=" ~/.npmrc .npmrc 2>/dev/null
 # Should be empty or use ${NPM_TOKEN} substitution only
 
 npm whoami  # verify current session

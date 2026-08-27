@@ -4,15 +4,15 @@
 
 ```mermaid
 flowchart TD
-    CLI["CLI Entry<br/><code>rattlesnake.py</code>"] --> ParseArgs["Parse Arguments<br/>--pretty, --quiet, --category,<br/>--audit-env, --output-file"]
-    ParseArgs --> InitCtx["Initialize ScanContext<br/>hostname, username, home,<br/>findings=[], observations=[]"]
+    CLI["CLI Entry<br/><code>rattlesnake.py</code>"] --> ParseArgs["Parse Arguments<br/>--pretty, --quiet, --category,<br/>--audit-env, --training,<br/>--output-file, --ioc-file"]
+    ParseArgs --> InitCtx["Initialize ScanContext<br/>hostname, username, home,<br/>findings, observations, errors,<br/>coverage gaps, scan scope"]
 
-    InitCtx --> AuditCheck{--audit-env?}
+    InitCtx --> AuditCheck{--audit-env or<br/>--training?}
     AuditCheck -->|Yes| AuditMode["run_audit_env()<br/>Dump variable metadata<br/>for heuristic tuning"]
     AuditMode --> Exit0["Exit 0"]
     AuditCheck -->|No| RunAll["run_all_scans()"]
 
-    RunAll --> ScanLoop["Iterate ALL_SCANS<br/>(11 scanners)"]
+    RunAll --> ScanLoop["Iterate ALL_SCANS<br/>(15 scanners)"]
 
     ScanLoop --> CatFilter{--category<br/>filter?}
     CatFilter -->|Skip| ScanLoop
@@ -24,7 +24,7 @@ flowchart TD
     AddFind --> ScanLoop
     Observe --> ScanLoop
 
-    ScanLoop -->|Done| BuildReport["build_report()<br/>JSON with findings,<br/>observations, summary"]
+    ScanLoop -->|Done| BuildReport["build_report()<br/>JSON with findings, observations,<br/>summary, scan_scope, errors"]
     BuildReport --> Emit["_emit()<br/>stdout or --output-file"]
     Emit --> JAMF["jamf_ea_line() → stderr<br/>CRITICAL:X HIGH:X MEDIUM:X"]
     JAMF --> ExitCode{Exit Code}

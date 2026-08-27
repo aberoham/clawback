@@ -28,7 +28,9 @@ Unencrypted SSH private keys on disk are immediately usable by any process with 
 | `~/.ssh/id_rsa` without `ENCRYPTED` header | HIGH | Unencrypted RSA private key |
 | `~/.ssh/id_ed25519` without encryption | HIGH | Unencrypted Ed25519 private key |
 | `~/.ssh/id_ecdsa` without encryption | HIGH | Unencrypted ECDSA private key |
-| Any `~/.ssh/id_*` without passphrase protection | HIGH | Unencrypted private key material |
+| Any owner-only private key without passphrase protection | HIGH | Unencrypted private key material |
+| Unencrypted private key readable or writable by group/others | CRITICAL | Unencrypted key with overly permissive mode |
+| Encrypted private key readable or writable by group/others | MEDIUM | Passphrase-protected key with overly permissive mode |
 
 ## Why it's exposed
 

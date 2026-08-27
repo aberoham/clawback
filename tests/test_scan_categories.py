@@ -132,6 +132,62 @@ class TestScanGcp:
         ]
         assert len(findings) == 0
 
+    def test_downloaded_service_account_key_critical(
+        self, scan_ctx, clean_env
+    ):
+        downloads = scan_ctx.home / "Downloads"
+        downloads.mkdir()
+        key_file = downloads / "example-project-a1b2c3.json"
+        key_file.write_text(json.dumps({
+            "type": "service_account",
+            "project_id": "example-project",
+            "client_email": "agent@example-project.iam.gserviceaccount.com",
+            "private_key": (
+                "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n"
+                "-----END PRIVATE KEY-----\n"
+            ),
+        }))
+
+        scan_cloud_credentials(scan_ctx, quiet=True)
+
+        findings = [f for f in scan_ctx.findings if f.path == str(key_file)]
+        assert len(findings) == 1
+        assert findings[0].severity == "critical"
+        assert "private_key" not in findings[0].details
+
+    def test_service_account_template_without_key_is_not_reported(
+        self, scan_ctx, clean_env
+    ):
+        project = scan_ctx.home / "Projects" / "app"
+        project.mkdir(parents=True)
+        (project / "service-account.example.json").write_text(json.dumps({
+            "type": "service_account",
+            "private_key": "{{ service_account_private_key }}",
+        }))
+
+        scan_cloud_credentials(scan_ctx, quiet=True)
+
+        assert not any(
+            "private key file" in f.description.lower()
+            for f in scan_ctx.findings
+        )
+
+    def test_adc_key_is_not_reported_twice(self, scan_ctx, clean_env):
+        gcloud = scan_ctx.home / ".config" / "gcloud"
+        gcloud.mkdir(parents=True)
+        adc = gcloud / "application_default_credentials.json"
+        adc.write_text(json.dumps({
+            "type": "service_account",
+            "private_key": (
+                "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n"
+                "-----END PRIVATE KEY-----\n"
+            ),
+        }))
+
+        scan_cloud_credentials(scan_ctx, quiet=True)
+
+        assert [f.path for f in scan_ctx.findings].count(str(adc)) == 1
+
 
 # -------------------------------------------------------------------
 # Azure
@@ -197,6 +253,18 @@ class TestScanGitCredentials:
         assert len(findings) == 1
         assert findings[0].severity == "high"
 
+    def test_xdg_git_credentials_critical(self, scan_ctx, clean_env):
+        xdg = scan_ctx.home / ".config" / "git"
+        xdg.mkdir(parents=True)
+        credentials = xdg / "credentials"
+        credentials.write_text("https://user:pass123@example.com\n")
+
+        scan_git_credentials(scan_ctx, quiet=True)
+
+        findings = [f for f in scan_ctx.findings if f.path == str(credentials)]
+        assert len(findings) == 1
+        assert findings[0].severity == "critical"
+
     def test_gitconfig_osxkeychain_observation(self, scan_ctx, clean_env):
         (scan_ctx.home / ".gitconfig").write_text(
             "[credential]\n\thelper = osxkeychain\n"
@@ -233,6 +301,8 @@ class TestScanPackageManagerTokens:
     def test_npmrc_auth_token_critical(self, scan_ctx, clean_env):
         (scan_ctx.home / ".npmrc").write_text(
             "//registry.npmjs.org/:_authToken=npm_1234567890abcdef\n"
+            "//registry.example.com/:_password=cGFzc3dvcmQ=\n"
+            "_auth=dXNlcjpwYXNzd29yZA==\n"
         )
         scan_package_manager_tokens(scan_ctx, quiet=True)
         findings = [
@@ -240,6 +310,42 @@ class TestScanPackageManagerTokens:
         ]
         assert len(findings) == 1
         assert findings[0].severity == "critical"
+        assert findings[0].details["auth_settings"] == [
+            "_auth", "_authtoken", "_password",
+        ]
+
+    def test_project_npmrc_auth_token_high(self, scan_ctx, clean_env):
+        project = scan_ctx.home / "Projects" / "webapp"
+        project.mkdir(parents=True)
+        (project / "package.json").write_text('{"name": "webapp"}')
+        npmrc = project / ".npmrc"
+        npmrc.write_text(
+            "//registry.npmjs.org/:_authToken=npm_1234567890abcdef\n"
+        )
+
+        scan_package_manager_tokens(scan_ctx, quiet=True)
+
+        findings = [f for f in scan_ctx.findings if f.path == str(npmrc)]
+        assert len(findings) == 1
+        assert findings[0].severity == "high"
+        assert findings[0].details["project_level"] is True
+
+    @pytest.mark.parametrize("reference", [
+        "${NPM_TOKEN}",
+        "$NPM_TOKEN",
+        "op://Development/npm/token",
+        "{{ npm_token }}",
+    ])
+    def test_npmrc_runtime_reference_not_reported(
+        self, scan_ctx, clean_env, reference
+    ):
+        (scan_ctx.home / ".npmrc").write_text(
+            f"//registry.npmjs.org/:_authToken={reference}\n"
+        )
+
+        scan_package_manager_tokens(scan_ctx, quiet=True)
+
+        assert not any("npmrc" in f.path for f in scan_ctx.findings)
 
     def test_pypirc_password_high(self, scan_ctx, clean_env):
         (scan_ctx.home / ".pypirc").write_text(
@@ -467,6 +573,41 @@ class TestScanCryptoWallets:
         exodus.mkdir(parents=True)
         scan_crypto_wallets(scan_ctx, quiet=True)
         assert len(scan_ctx.findings) == 0
+
+    def test_default_solana_keypair_high(self, scan_ctx, clean_env):
+        solana = scan_ctx.home / ".config" / "solana"
+        solana.mkdir(parents=True)
+        keypair = solana / "id.json"
+        keypair.write_text(json.dumps(list(range(64))))
+
+        scan_crypto_wallets(scan_ctx, quiet=True)
+
+        findings = [f for f in scan_ctx.findings if f.path == str(keypair)]
+        assert len(findings) == 1
+        assert findings[0].severity == "high"
+
+    def test_configured_solana_keypair_high(self, scan_ctx, clean_env):
+        config_dir = scan_ctx.home / ".config" / "solana" / "cli"
+        config_dir.mkdir(parents=True)
+        keypair = scan_ctx.home / "keys" / "solana-dev.json"
+        keypair.parent.mkdir()
+        keypair.write_text(json.dumps(list(reversed(range(64)))))
+        (config_dir / "config.yml").write_text(
+            f"keypair_path: {keypair}\n"
+        )
+
+        scan_crypto_wallets(scan_ctx, quiet=True)
+
+        assert any(f.path == str(keypair) for f in scan_ctx.findings)
+
+    def test_non_keypair_json_not_reported(self, scan_ctx, clean_env):
+        solana = scan_ctx.home / ".config" / "solana"
+        solana.mkdir(parents=True)
+        (solana / "id.json").write_text(json.dumps([1, 2, 3]))
+
+        scan_crypto_wallets(scan_ctx, quiet=True)
+
+        assert not scan_ctx.findings
 
 
 # -------------------------------------------------------------------

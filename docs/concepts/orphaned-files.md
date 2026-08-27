@@ -23,7 +23,7 @@ This pattern repeats across nearly every credential type. The new secure mechani
 |-----------------------|------------------------|
 | AWS IAM Identity Center (SSO) | `~/.aws/credentials` with static `aws_access_key_id` / `aws_secret_access_key` |
 | Azure CLI with MSAL | `~/.azure/accessTokens.json` (legacy ADAL cache) |
-| Git `osxkeychain` credential helper | `~/.git-credentials` with plaintext tokens |
+| Git `osxkeychain` credential helper | `~/.git-credentials` or `~/.config/git/credentials` with plaintext tokens |
 | Kubernetes exec plugins | `~/.kube/config` with stale embedded tokens and certificates |
 | Encrypted or hardware-backed SSH key | Original unencrypted `~/.ssh/id_rsa` kept as "backup" |
 | Docker credential store | `~/.docker/config.json` with base64 `auths` entries alongside `credsStore` |

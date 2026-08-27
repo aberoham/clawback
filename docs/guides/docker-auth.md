@@ -26,7 +26,7 @@ Docker stores registry credentials in `~/.docker/config.json`. By default, these
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
-| `~/.docker/config.json` with `"auths"` containing base64 credentials | HIGH | Base64-encoded registry credentials (trivially decodable) |
+| `~/.docker/config.json` with `"auths"` containing base64 credentials | CRITICAL | Base64-encoded registry credentials (trivially decodable) |
 
 ## Why it's exposed
 

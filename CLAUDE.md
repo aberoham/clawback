@@ -26,26 +26,42 @@ Single-file macOS secret exposure scanner (`rattlesnake.py`, stdlib-only, read-o
 
 ### Core data flow
 
-`ScanContext` accumulates `Finding` objects (actionable) and observations (informational) as each scanner runs. `run_all_scans()` iterates `ALL_SCANS` — a list of `(category_name, scan_function)` pairs registered at line ~1535. Every scanner follows the signature `scan_X(ctx: ScanContext, quiet: bool) -> None`.
+`ScanContext` accumulates `Finding` objects (actionable), observations
+(informational), errors, coverage gaps, and completed categories as each scanner
+runs. `run_all_scans()` iterates the `ALL_SCANS` registry near the end of
+`rattlesnake.py`. Every scanner follows the signature
+`scan_X(ctx: ScanContext, quiet: bool) -> None`.
 
 Exit codes: 0 = clean, 1 = findings, 2 = scan error.
 
 ### Value classification (classify_value + _name_value_suspicious)
 
-`classify_value(value)` is purely value-based — it never sees the variable name. Three tiers:
-1. **Known prefixes** (`KNOWN_SECRET_PREFIXES`): `sk-`, `ghp_`, `AKIA`, `lsv2_pt_`, etc. Highest confidence.
-2. **Structural patterns**: URL with embedded credentials, long hex (>=32), high-entropy base64-ish.
-3. **Entropy threshold**: Shannon entropy > 4.5 for strings >= 20 chars.
+`classify_value(value)` is purely value-based — it never sees the variable name.
+It recognizes whole-value template placeholders and runtime references first,
+then known prefixes and credential-bearing URLs. Entropy is scored per
+whitespace-separated token (and on the value half of `flag=value`) so command
+lines do not become false positives while embedded credentials still fire.
+Long hex and base64-like values are structural fallbacks.
 
 When `classify_value` returns `"benign"` but the variable *name* matches `NAMED_SECRET_VARS` or `GENERIC_SECRET_RE`, `_name_value_suspicious()` applies relaxed thresholds (entropy >= 3.5, length >= 20) with filters for URLs, word-like values, and placeholder strings.
 
 ### Severity tiers
 
-`NAMED_SECRET_VARS` (tier-1 exact matches like `OPENAI_API_KEY`) get HIGH severity. `GENERIC_SECRET_RE` pattern matches (tier-2, e.g. `MY_CUSTOM_API_KEY`) get MEDIUM. This applies consistently across both the `val_hit` and `nv_hit` code paths in all three scanners.
+In shell profiles and the live environment, `NAMED_SECRET_VARS` exact matches
+such as `OPENAI_API_KEY` get HIGH severity and `GENERIC_SECRET_RE` matches such
+as `MY_CUSTOM_API_KEY` get MEDIUM. `.env` files are aggregated per file and are
+HIGH, or CRITICAL when they contain a cloud credential. Public resource IDs are
+suppressed only when both the variable-name category and a plain-hex value
+agree.
 
 ### Scan categories (15)
 
 teampcp_iocs, npm_supply_chain, agent_autostart_hooks, repo_worm_artifacts, malware_persistence, cloud_credentials, ssh_keys, git_credentials, package_manager_tokens, kubernetes, shell_profiles, environment_variables, env_files, crypto_wallets, secrets_manager_status. The `--category` flag restricts to one.
+
+Two filter names retain legacy finding-category aliases in JSON:
+`teampcp_iocs` emits `teampcp_ioc`, and `shell_profiles` emits
+`shell_profile_secrets`. Antivenom filters on the emitted finding category, not
+the scanner-selection name.
 
 ### Supply-chain / malware IoC scanners
 
@@ -110,8 +126,8 @@ detection: `MANIFEST_MAX_BYTES` for `package.json` and agent configs (64 KiB
 truncated `date-fns`, and would truncate a hook placed after padding),
 `WORKFLOW_MAX_BYTES` for CI workflows (a modified workflow has an unknown
 hash, so the marker search is the only signal left and must cover the whole
-file), `LOCKFILE_MAX_BYTES` for lockfiles. Exceeding any of them is a
-reported error, never a silent skip.
+file), `LOCKFILE_MAX_BYTES` for lockfiles. Exceeding any of them is a reported
+coverage gap, never a silent skip.
 
 `_scan_installed_packages()` walks *every* installed package, including nested
 `node_modules` trees (a version conflict routinely puts the only copy at
@@ -121,11 +137,14 @@ repositories independently of agent configs and deduplicates by resolved path
 — deriving roots from hook files missed artifacts left after the hooks were
 deleted, and double-reported repos carrying both hooks.
 
-Failure is never silent: unreadable/unparseable/oversize files and truncated
-discovery all append to `ctx.errors`. Discovery is bounded by
-`SUPPLY_CHAIN_MAX_DIRS` and `SUPPLY_CHAIN_TIME_BUDGET` in addition to
-`SUPPLY_CHAIN_PRUNE_DIRS`, since prune lists are always incomplete — `~/.dolt`
-cost 74s for three directories before it was pruned.
+Runtime coverage failures are recorded: unreadable, unparseable, or oversize
+files and exhausted discovery budgets append to `ctx.coverage_gaps`. Scanner
+exceptions and invalid CLI inputs append to `ctx.errors` and set exit code 2.
+Discovery also has a fixed `SUPPLY_CHAIN_MAX_DEPTH` and an explicit
+`SUPPLY_CHAIN_PRUNE_DIRS` boundary; it is bounded at runtime by
+`SUPPLY_CHAIN_MAX_DIRS` and `SUPPLY_CHAIN_TIME_BUDGET`, since prune lists are
+always incomplete — `~/.dolt` cost 74s for three directories before it was
+pruned.
 
 Severity convention here: confirmed malware is `critical`, a structural pattern
 that is dangerous but not proof of compromise (secret-dumping CI workflow,

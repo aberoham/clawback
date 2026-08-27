@@ -26,9 +26,9 @@ Kubeconfig files can embed long-lived bearer tokens, client certificates, and pr
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
-| `~/.kube/config` with `token` field | HIGH | Embedded bearer token |
+| `~/.kube/config` with `token` or `password` field | CRITICAL | Embedded bearer credential |
 | `~/.kube/config` with `client-certificate-data` | HIGH | Embedded client certificate |
-| `~/.kube/config` with `client-key-data` | CRITICAL | Embedded client private key |
+| `~/.kube/config` with `client-key-data` | HIGH | Embedded client private key; LOW when paired certificate is confirmed expired |
 
 ## Why it's exposed
 

@@ -20,7 +20,10 @@ Rattlesnake tells you **what is exposed**. This library tells you **how to fix i
    python3 rattlesnake.py --pretty
    ```
 
-2. For each finding, open the matching remediation guide below.
+2. For a credential-exposure finding, open the matching remediation guide
+   below. Active-compromise findings carry incident-response instructions in
+   the report and in Antivenom; follow those instructions before rotating any
+   credential.
 3. Pick a [tier](concepts/tier-definitions.md) appropriate to your situation.
 4. Follow the commands. Verify with rattlesnake.
 
@@ -58,9 +61,20 @@ Jump directly to a credential type.
 | RubyGems API keys | `package_manager_tokens` | [Guide](guides/rubygems-keys.md) |
 | Cargo/crates.io tokens | `package_manager_tokens` | [Guide](guides/cargo-tokens.md) |
 | Kubernetes kubeconfig | `kubernetes` | [Guide](guides/kubernetes-kubeconfig.md) |
-| Shell profile and .env secrets | `shell_profiles` / `env_files` | [Guide](guides/shell-env-secrets.md) |
+| Shell profile, live environment, and .env secrets | `shell_profile_secrets` / `environment_variables` / `env_files` | [Guide](guides/shell-env-secrets.md) |
 | Cryptocurrency wallets | `crypto_wallets` | [Guide](guides/crypto-wallets.md) |
+
+The scanner-selection names `shell_profiles` and `teampcp_iocs` emit the legacy
+finding-category names `shell_profile_secrets` and `teampcp_ioc` respectively.
+Antivenom's `--category` option uses the emitted name shown in scan JSON.
+
+Active-compromise categories (`teampcp_ioc`, `npm_supply_chain`,
+`agent_autostart_hooks`, `repo_worm_artifacts`, and `malware_persistence`) are
+human-first incident response rather than ordinary credential remediation. See
+the repository README and the finding-specific remediation text.
 
 ---
 
-Research date: March 2026. Synthesized from independent deep research by Claude, ChatGPT, and Gemini. Version-specific details are noted throughout; check vendor documentation for the latest.
+Vendor research date: March 2026. Repository behavior reconciled with the
+scanner in August 2026. Version-specific vendor details can change; check the
+current vendor documentation before operational use.

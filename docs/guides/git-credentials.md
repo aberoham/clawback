@@ -4,14 +4,17 @@ parent: Remediation Guides
 nav_order: 5
 description: >-
   Remediate plaintext Git credentials and .netrc passwords found by rattlesnake
-  in ~/.git-credentials, ~/.netrc, and gitconfig.
+  in user and XDG stores, ~/.netrc, and gitconfig.
 rattlesnake_category: git_credentials
 ---
 
 # Git credentials
 {: .no_toc }
 
-Git's `credential.helper = store` saves passwords in plaintext at `~/.git-credentials`. The `.netrc` file serves a similar role for tools like curl, Go modules, and Heroku CLI.
+Git's `credential.helper = store` saves passwords in plaintext at
+`~/.git-credentials` by default, or at an explicitly configured/XDG-style
+credential path. The `.netrc` file serves a similar role for tools like curl,
+Go modules, and Heroku CLI.
 
 <details open markdown="block">
   <summary>Table of contents</summary>
@@ -26,10 +29,10 @@ Git's `credential.helper = store` saves passwords in plaintext at `~/.git-creden
 
 | Path / indicator | Severity | Description |
 |-----------------|----------|-------------|
-| `~/.git-credentials` | HIGH | Plaintext credentials in URL format |
-| `~/.config/git/credentials` | HIGH | XDG-style plaintext credentials |
+| `~/.git-credentials` | CRITICAL | Plaintext credentials in URL format |
+| `~/.config/git/credentials` | CRITICAL | XDG-style plaintext credentials |
 | `~/.netrc` | HIGH | Plaintext passwords for HTTP services |
-| `credential.helper = store` in gitconfig | MEDIUM | Configuration directing Git to store plaintext |
+| `credential.helper = store` in gitconfig | HIGH | Configuration directing Git to store plaintext |
 
 ## Why it's exposed
 
