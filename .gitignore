@@ -29,3 +29,6 @@ docs/vendor/
 .vscode/
 *.swp
 *.swo
+
+# Generated RTR delivery payload (rebuild with tools/Build-RtrPayload.ps1)
+rattlesnake.min.ps1
